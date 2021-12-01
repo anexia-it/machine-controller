@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/anexia-it/go-anxcloud/pkg/vsphere/provisioning/progress"
 	"github.com/kubermatic/machine-controller/pkg/cloudprovider/provider/anexia/utils"
 	"k8s.io/apimachinery/pkg/api/meta"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -170,7 +171,7 @@ func provisionVM(ctx context.Context, client anxclient.Client) error {
 		}
 		vm.SSH = sshKey.PublicKey
 
-		provisionResponse, err := vmAPI.Provisioning().VM().Provision(ctx, vm)
+		provisionResponse, err := vmAPI.Provisioning().VM().Provision(ctx, vm, false)
 		meta.SetStatusCondition(&status.Conditions, v1.Condition{
 			Type:    ProvisionedType,
 			Status:  v1.ConditionFalse,
@@ -416,16 +417,42 @@ func (p *provider) Cleanup(machine *v1alpha1.Machine, _ *cloudprovidertypes.Prov
 	ctx, cancel := context.WithTimeout(context.Background(), anxtypes.DeleteRequestTimeout)
 	defer cancel()
 
-	err = vsphereAPI.Provisioning().VM().Deprovision(ctx, status.InstanceID, false)
-	if err != nil {
-		var respErr *anxclient.ResponseError
-		// Only error if the error was not "not found"
-		if !(errors.As(err, &respErr) && respErr.ErrorData.Code == http.StatusNotFound) {
-			return false, newError(common.DeleteMachineError, "failed to delete machine: %v", err)
+	// first check whether there is an provisioning ongoing
+	if status.DeprovisioningID == "" {
+		response, err := vsphereAPI.Provisioning().VM().Deprovision(ctx, status.InstanceID, false)
+		if err != nil {
+			var respErr *anxclient.ResponseError
+			// Only error if the error was not "not found"
+			if !(errors.As(err, &respErr) && respErr.ErrorData.Code == http.StatusNotFound) {
+				return false, newError(common.DeleteMachineError, "failed to delete machine: %v", err)
+			}
+		}
+		status.DeprovisioningID = response.Identifier
+
+		if err != nil {
+			return false, err
 		}
 	}
 
-	return true, nil
+	return isTaskDone(ctx, cli, status.DeprovisioningID)
+}
+
+func isTaskDone(ctx context.Context, cli anxclient.Client, progressIdentifier string) (bool, error) {
+	response, err := progress.NewAPI(cli).Get(ctx, progressIdentifier)
+	if err != nil {
+		return false, err
+	}
+
+	if len(response.Errors) != 0 {
+		taskErrors, _ := json.Marshal(response.Errors)
+		return true, fmt.Errorf("task failed with: %s", taskErrors)
+	}
+
+	if response.Progress == 100 {
+		return true, nil
+	}
+
+	return false, nil
 }
 
 func (p *provider) MigrateUID(_ *v1alpha1.Machine, _ k8stypes.UID) error {

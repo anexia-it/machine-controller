@@ -184,7 +184,7 @@ func TestAnexiaProvider(t *testing.T) {
 		t.Parallel()
 		providerStatus := &anxtypes.ProviderStatus{
 			ReservedIP: "",
-			IPState: "",
+			IPState:    "",
 		}
 		ctx := utils.CreateReconcileContext(utils.ReconcileContext{Status: providerStatus})
 

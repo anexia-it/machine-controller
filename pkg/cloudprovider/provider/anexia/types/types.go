@@ -32,8 +32,8 @@ const (
 	GetRequestTimeout    = 1 * time.Minute
 	DeleteRequestTimeout = 1 * time.Minute
 
-	IPStateBound    = "Bound"
-	IPStateUnbound  = "Unbound"
+	IPStateBound   = "Bound"
+	IPStateUnbound = "Unbound"
 
 	VmxNet3NIC       = "vmxnet3"
 	MachinePoweredOn = "poweredOn"
@@ -55,11 +55,12 @@ type RawConfig struct {
 }
 
 type ProviderStatus struct {
-	InstanceID     string         `json:"instanceID"`
-	ProvisioningID string         `json:"provisioningID"`
-	ReservedIP     string         `json:"reservedIP"`
-	IPState        string         `json:"ipState"`
-	Conditions     []v1.Condition `json:"conditions,omitempty"`
+	InstanceID       string         `json:"instanceID"`
+	ProvisioningID   string         `json:"provisioningID"`
+	DeprovisioningID string         `json:"deprovisioningID"`
+	ReservedIP       string         `json:"reservedIP"`
+	IPState          string         `json:"ipState"`
+	Conditions       []v1.Condition `json:"conditions,omitempty"`
 }
 
 type Config struct {
