@@ -44,6 +44,8 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	cloudproviderutil "github.com/kubermatic/machine-controller/pkg/cloudprovider/util"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -484,8 +486,11 @@ func (p *provider) SetMetricsForMachines(_ clusterv1alpha1.MachineList) error {
 
 func getClient(token string) (anxclient.Client, error) {
 	tokenOpt := anxclient.TokenFromString(token)
-	client := anxclient.HTTPClient(&http.Client{Timeout: 30 * time.Second})
-	return anxclient.New(tokenOpt, client)
+	httpClient := cloudproviderutil.HTTPClientConfig{
+		Timeout:   30 * time.Second,
+		LogPrefix: "[Anexia API]",
+	}.New()
+	return anxclient.New(tokenOpt, anxclient.HTTPClient(&httpClient))
 }
 
 func getProviderStatus(machine *clusterv1alpha1.Machine) anxtypes.ProviderStatus {
