@@ -1,0 +1,39 @@
+on:
+  push:
+    branches-ignore:
+    - main
+    - for-upstream/*
+
+jobs:
+  make-upstream-branch:
+    name: Make branch rebased onto upstream
+    runs-on: ubuntu-latest
+    container:
+      image: bitnami/git:2.34.1
+      env:
+        UPSTREAM_REPOSITORY:  https://github.com/kubermatic/machine-controller.git
+        UPSTREAM_DEST_BRANCH: master
+    steps:
+    - uses: actions/checkout@v2
+      with:
+        fetch-depth: 0
+
+    - name: configure user name and email
+      run: |
+        git config user.name 'ANEXIA Bot' 
+        git config user.email 'github-anx-release@anexia-it.com' 
+
+    - name: add upstream remote
+      run:  git remote add upstream $UPSTREAM_REPOSITORY
+
+    - name: fetch upstream repository
+      run:  git fetch upstream
+
+    - name: create new for-upstream branch
+      run: git checkout -B for-upstream/$GITHUB_REF_NAME
+
+    - name: rebase branch onto upstream destination branch
+      run: git rebase --onto upstream/$UPSTREAM_DEST_BRANCH origin/main
+    
+    - name: push new for-upstream branch
+      run: git push -u origin for-upstream/$GITHUB_REF_NAME --force
