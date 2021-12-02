@@ -397,7 +397,15 @@ func (p *provider) GetCloudConfig(_ v1alpha1.MachineSpec) (string, string, error
 	return "", "", nil
 }
 
-func (p *provider) Cleanup(machine *v1alpha1.Machine, _ *cloudprovidertypes.ProviderData) (bool, error) {
+func (p *provider) Cleanup(machine *v1alpha1.Machine, data *cloudprovidertypes.ProviderData) (isDeleted bool, retErr error) {
+	status := getProviderStatus(machine)
+	// make sure status is reflected in Machine Object
+	defer func() {
+		// if error occurs during updating the machine object don't override the original error
+		retErr = anxtypes.NewMultiError(retErr, updateMachineStatus(machine, status, data.Update))
+	}()
+
+	ensureConditions(&status)
 	config, _, err := p.getConfig(machine.Spec.ProviderSpec)
 	if err != nil {
 		return false, newError(common.InvalidConfigurationMachineError, "failed to parse MachineSpec: %v", err)
@@ -409,7 +417,6 @@ func (p *provider) Cleanup(machine *v1alpha1.Machine, _ *cloudprovidertypes.Prov
 	}
 	vsphereAPI := vsphere.NewAPI(cli)
 
-	status := getProviderStatus(machine)
 	if err != nil {
 		return false, newError(common.InvalidConfigurationMachineError, "failed to get machine status: %v", err)
 	}
