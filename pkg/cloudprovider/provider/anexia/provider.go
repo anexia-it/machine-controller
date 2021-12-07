@@ -186,6 +186,10 @@ func provisionVM(ctx context.Context, client anxclient.Client) error {
 		status.IPState = anxtypes.IPStateBound
 
 		status.ProvisioningID = provisionResponse.Identifier
+		err = updateMachineStatus(reconcileContext.Machine, *status, reconcileContext.ProviderData.Update)
+		if err != nil {
+			return err
+		}
 	}
 
 	instanceID, err := vmAPI.Provisioning().Progress().AwaitCompletion(ctx, status.ProvisioningID)
