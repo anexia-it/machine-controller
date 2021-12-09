@@ -217,6 +217,10 @@ func provisionVM(ctx context.Context, client anxclient.Client) error {
 		Message: "Machine has been successfully created",
 	})
 
+	err = updateMachineStatus(reconcileContext.Machine, *status, reconcileContext.ProviderData.Update)
+	if err != nil {
+		return err
+	}
 	return nil
 }
 
