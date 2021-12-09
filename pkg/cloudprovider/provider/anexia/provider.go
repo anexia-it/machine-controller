@@ -132,6 +132,7 @@ func waitForVM(ctx context.Context, client anxclient.Client) error {
 	}
 
 	reconcileContext.Status.InstanceID = identifier
+	updateMachineStatus(reconcileContext.Machine, *reconcileContext.Status, reconcileContext.ProviderData.Update)
 	return nil
 }
 
@@ -493,9 +494,9 @@ func (p *provider) SetMetricsForMachines(_ v1alpha1.MachineList) error {
 }
 
 func getClient(token string) (anxclient.Client, error) {
-
 	tokenOpt := anxclient.TokenFromString(token)
-	return anxclient.New(tokenOpt)
+	client := anxclient.HTTPClient(&http.Client{Timeout: 30 * time.Second})
+	return anxclient.New(tokenOpt, client)
 }
 
 func getProviderStatus(machine *v1alpha1.Machine) anxtypes.ProviderStatus {
