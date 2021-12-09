@@ -61,6 +61,7 @@ type provider struct {
 func (p *provider) Create(machine *v1alpha1.Machine, data *cloudprovidertypes.ProviderData,
 	userdata string) (instance instance.Instance, retErr error) {
 	status := getProviderStatus(machine)
+	klog.V(3).Infof(fmt.Sprintf("'%s' has status %#v", machine.Name, status))
 
 	// ensure conditions are present on machine
 	ensureConditions(&status)
@@ -91,6 +92,7 @@ func (p *provider) Create(machine *v1alpha1.Machine, data *cloudprovidertypes.Pr
 
 	// check whether machine is already provisioning
 	if isAlreadyProvisioning(ctx) && status.ProvisioningID == "" {
+		klog.Info("ongoing provisioning detected")
 		err := waitForVM(ctx, client)
 		if err != nil {
 			return nil, err
@@ -111,6 +113,7 @@ func waitForVM(ctx context.Context, client anxclient.Client) error {
 	api := vsphere.NewAPI(client)
 	var identifier string
 	err := wait.PollImmediate(5*time.Second, 1*time.Minute, func() (bool, error) {
+		klog.V(2).Info("checking for VM with name ", reconcileContext.Machine.Name)
 		vms, err := api.Search().ByName(ctx, fmt.Sprintf("%%-%s", reconcileContext.Machine.Name))
 		if err != nil {
 			return false, nil
@@ -141,6 +144,9 @@ func provisionVM(ctx context.Context, client anxclient.Client) error {
 
 	status := reconcileContext.Status
 	if status.ProvisioningID == "" {
+		klog.V(2).Info(fmt.Sprintf("Machine '%s'  does not contain a provisioningID yet. Starting to provision",
+			reconcileContext.Machine.Name))
+
 		config := reconcileContext.Config
 		reservedIP, err := getIPAddress(ctx, client)
 		if err != nil {
@@ -192,8 +198,12 @@ func provisionVM(ctx context.Context, client anxclient.Client) error {
 		}
 	}
 
+	klog.V(2).Info(fmt.Sprintf("Using provisionID from machine '%s' to await completion",
+		reconcileContext.Machine.Name))
+
 	instanceID, err := vmAPI.Provisioning().Progress().AwaitCompletion(ctx, status.ProvisioningID)
 	if err != nil {
+		klog.Error("failed to await machine completion '%s'", reconcileContext.Machine.Name)
 		// something went wrong remove provisioning ID, so we can start from scratch
 		status.ProvisioningID = ""
 		return newError(common.CreateMachineError, "instance provisioning failed: %v", err)
@@ -216,10 +226,10 @@ func getIPAddress(ctx context.Context, client anxclient.Client) (string, error) 
 
 	// only use IP if it is still unbound
 	if status.ReservedIP != "" && status.IPState == anxtypes.IPStateUnbound {
-		klog.Info("resuing already provisioned ip", "IP", status.ReservedIP)
+		klog.Info("reusing already provisioned ip", "IP", status.ReservedIP)
 		return status.ReservedIP, nil
 	}
-
+	klog.Info(fmt.Sprintf("Creating a new IP for machine ''%s", reconcileContext.Machine.Name))
 	addrAPI := anxaddr.NewAPI(client)
 	config := reconcileContext.Config
 	res, err := addrAPI.ReserveRandom(ctx, anxaddr.ReserveRandom{
