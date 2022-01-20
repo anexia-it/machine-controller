@@ -104,7 +104,7 @@ func (p Provider) UserData(req plugin.UserDataRequest) (string, error) {
 		KubernetesCACert:   kubernetesCACert,
 		NodeIPScript:       userdatahelper.SetupNodeIPEnvScript(),
 		InsecureRegistries: req.ContainerRuntime.InsecureRegistries,
-		RegistryMirrors:    req.ContainerRuntime.RegistryMirrors,
+		RegistryMirrors:    req.ContainerRuntime.RegistryMirrors["docker.io"],
 	}
 	b := &bytes.Buffer{}
 	err = tmpl.Execute(b, data)
@@ -202,7 +202,7 @@ write_files:
 
 - path: "/etc/systemd/system/kubelet.service"
   content: |
-{{ kubeletSystemdUnit .ContainerRuntime.String .KubeletVersion .CloudProviderName .MachineSpec.Name .DNSIPs .ExternalCloudProvider .PauseImage .MachineSpec.Taints .ExtraKubeletFlags | indent 4 }}
+{{ kubeletSystemdUnit .ContainerRuntime.String .KubeletVersion .KubeletCloudProviderName .MachineSpec.Name .DNSIPs .ExternalCloudProvider .PauseImage .MachineSpec.Taints .ExtraKubeletFlags | indent 4 }}
 
 - path: "/etc/systemd/system/kubelet.service.d/extras.conf"
   content: |
@@ -246,7 +246,7 @@ write_files:
 
 - path: "/etc/kubernetes/kubelet.conf"
   content: |
-{{ kubeletConfiguration "cluster.local" .DNSIPs .KubeletFeatureGates | indent 4 }}
+{{ kubeletConfiguration "cluster.local" .DNSIPs .KubeletFeatureGates .KubeletConfigs | indent 4 }}
 
 - path: "/etc/profile.d/opt-bin-path.sh"
   permissions: "0644"

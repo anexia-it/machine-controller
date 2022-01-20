@@ -92,7 +92,7 @@ kPe6XoSbiLm/kxk32T0=
 )
 
 const (
-	defaultVersion = "1.21.5"
+	defaultVersion = "1.22.5"
 )
 
 type fakeCloudConfigProvider struct {
@@ -118,17 +118,18 @@ type userDataTestCase struct {
 	httpProxy             string
 	noProxy               string
 	insecureRegistries    []string
-	registryMirrors       []string
+	registryMirrors       map[string][]string
+	registryCredentials   map[string]containerruntime.AuthConfig
 	pauseImage            string
 	containerruntime      string
 }
 
 func simpleVersionTests() []userDataTestCase {
 	versions := []*semver.Version{
-		semver.MustParse("v1.19.15"),
-		semver.MustParse("v1.20.11"),
-		semver.MustParse("v1.21.5"),
-		semver.MustParse("v1.22.2"),
+		semver.MustParse("v1.20.14"),
+		semver.MustParse("v1.21.8"),
+		semver.MustParse("v1.22.5"),
+		semver.MustParse("v1.23.0"),
 	}
 
 	var tests []userDataTestCase
@@ -231,7 +232,7 @@ func TestUserDataGeneration(t *testing.T) {
 					Name: "node1",
 				},
 				Versions: clusterv1alpha1.MachineVersionInfo{
-					Kubelet: "1.21.5",
+					Kubelet: "1.22.5",
 				},
 			},
 			ccProvider: &fakeCloudConfigProvider{
@@ -256,7 +257,7 @@ func TestUserDataGeneration(t *testing.T) {
 					Name: "node1",
 				},
 				Versions: clusterv1alpha1.MachineVersionInfo{
-					Kubelet: "1.21.5",
+					Kubelet: "1.22.5",
 				},
 			},
 			ccProvider: &fakeCloudConfigProvider{
@@ -307,7 +308,7 @@ func TestUserDataGeneration(t *testing.T) {
 					Name: "node1",
 				},
 				Versions: clusterv1alpha1.MachineVersionInfo{
-					Kubelet: "1.21.5",
+					Kubelet: "1.22.5",
 				},
 			},
 			ccProvider: &fakeCloudConfigProvider{
@@ -333,7 +334,7 @@ func TestUserDataGeneration(t *testing.T) {
 					Name: "node1",
 				},
 				Versions: clusterv1alpha1.MachineVersionInfo{
-					Kubelet: "1.21.5",
+					Kubelet: "1.22.5",
 				},
 			},
 			ccProvider: &fakeCloudConfigProvider{
@@ -359,7 +360,7 @@ func TestUserDataGeneration(t *testing.T) {
 					Name: "node1",
 				},
 				Versions: clusterv1alpha1.MachineVersionInfo{
-					Kubelet: "1.21.5",
+					Kubelet: "1.22.5",
 				},
 			},
 			ccProvider: &fakeCloudConfigProvider{
@@ -389,7 +390,7 @@ func TestUserDataGeneration(t *testing.T) {
 					Name: "node1",
 				},
 				Versions: clusterv1alpha1.MachineVersionInfo{
-					Kubelet: "1.21.5",
+					Kubelet: "1.22.5",
 				},
 			},
 			ccProvider: &fakeCloudConfigProvider{
@@ -404,12 +405,22 @@ func TestUserDataGeneration(t *testing.T) {
 			},
 			httpProxy:       "http://192.168.100.100:3128",
 			noProxy:         "192.168.1.0",
-			registryMirrors: []string{"https://registry.docker-cn.com"},
+			registryMirrors: map[string][]string{"docker.io": {"https://registry.docker-cn.com"}},
 			pauseImage:      "192.168.100.100:5000/kubernetes/pause:v3.1",
 		},
 		{
 			name:             "containerd",
 			containerruntime: "containerd",
+			registryCredentials: map[string]containerruntime.AuthConfig{
+				"docker.io": {
+					Username: "login1",
+					Password: "passwd1",
+				},
+			},
+			insecureRegistries: []string{"k8s.gcr.io"},
+			registryMirrors: map[string][]string{
+				"k8s.gcr.io": {"https://intranet.local"},
+			},
 			providerSpec: &providerconfigtypes.Config{
 				CloudProvider: "",
 				SSHPublicKeys: []string{"ssh-rsa AAABBB"},
@@ -431,6 +442,32 @@ func TestUserDataGeneration(t *testing.T) {
 			kubernetesCACert: "CACert",
 			osConfig: &Config{
 				DistUpgradeOnBoot: true,
+			},
+		},
+		{
+			name: "nutanix",
+			providerSpec: &providerconfigtypes.Config{
+				CloudProvider:        "nutanix",
+				SSHPublicKeys:        []string{"ssh-rsa AAABBB"},
+				OverwriteCloudConfig: stringPtr("custom\ncloud\nconfig"),
+			},
+			spec: clusterv1alpha1.MachineSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "node1",
+				},
+				Versions: clusterv1alpha1.MachineVersionInfo{
+					Kubelet: "1.21.5",
+				},
+			},
+			ccProvider: &fakeCloudConfigProvider{
+				name:   "nutanix",
+				config: "{nutanix-config:true}",
+				err:    nil,
+			},
+			DNSIPs:           []net.IP{net.ParseIP("10.10.10.10")},
+			kubernetesCACert: "CACert",
+			osConfig: &Config{
+				DistUpgradeOnBoot: false,
 			},
 		},
 	}...)
@@ -463,20 +500,22 @@ func TestUserDataGeneration(t *testing.T) {
 			}
 
 			req := plugin.UserDataRequest{
-				MachineSpec:           test.spec,
-				Kubeconfig:            kubeconfig,
-				CloudConfig:           cloudConfig,
-				CloudProviderName:     cloudProviderName,
-				DNSIPs:                test.DNSIPs,
-				ExternalCloudProvider: test.externalCloudProvider,
-				HTTPProxy:             test.httpProxy,
-				NoProxy:               test.noProxy,
-				PauseImage:            test.pauseImage,
-				KubeletFeatureGates:   kubeletFeatureGates,
+				MachineSpec:              test.spec,
+				Kubeconfig:               kubeconfig,
+				CloudConfig:              cloudConfig,
+				CloudProviderName:        cloudProviderName,
+				KubeletCloudProviderName: cloudProviderName,
+				DNSIPs:                   test.DNSIPs,
+				ExternalCloudProvider:    test.externalCloudProvider,
+				HTTPProxy:                test.httpProxy,
+				NoProxy:                  test.noProxy,
+				PauseImage:               test.pauseImage,
+				KubeletFeatureGates:      kubeletFeatureGates,
 				ContainerRuntime: containerruntime.Get(
 					test.containerruntime,
 					containerruntime.WithInsecureRegistries(test.insecureRegistries),
 					containerruntime.WithRegistryMirrors(test.registryMirrors),
+					containerruntime.WithRegistryCredentials(test.registryCredentials),
 				),
 			}
 			s, err := provider.UserData(req)

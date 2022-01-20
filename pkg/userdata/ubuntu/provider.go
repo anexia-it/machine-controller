@@ -215,7 +215,15 @@ write_files:
       {{- if eq .CloudProviderName "vsphere" }}
       open-vm-tools \
       {{- end }}
+      {{- if eq .CloudProviderName "nutanix" }}
+      open-iscsi \
+      {{- end }}
       ipvsadm
+    
+    {{- /* iscsid service is required on Nutanix machines for CSI driver to attach volumes. */}}
+    {{- if eq .CloudProviderName "nutanix" }}
+    systemctl enable --now iscsid
+    {{ end }}
 
     # Update grub to include kernel command options to enable swap accounting.
     # Exclude alibaba cloud until this is fixed https://github.com/kubermatic/machine-controller/issues/682
@@ -247,7 +255,7 @@ write_files:
 
 - path: "/etc/systemd/system/kubelet.service"
   content: |
-{{ kubeletSystemdUnit .ContainerRuntimeName .KubeletVersion .CloudProviderName .MachineSpec.Name .DNSIPs .ExternalCloudProvider .PauseImage .MachineSpec.Taints .ExtraKubeletFlags | indent 4 }}
+{{ kubeletSystemdUnit .ContainerRuntimeName .KubeletVersion .KubeletCloudProviderName .MachineSpec.Name .DNSIPs .ExternalCloudProvider .PauseImage .MachineSpec.Taints .ExtraKubeletFlags | indent 4 }}
 
 - path: "/etc/systemd/system/kubelet.service.d/extras.conf"
   content: |
@@ -301,7 +309,7 @@ write_files:
 
 - path: "/etc/kubernetes/kubelet.conf"
   content: |
-{{ kubeletConfiguration "cluster.local" .DNSIPs .KubeletFeatureGates | indent 4 }}
+{{ kubeletConfiguration "cluster.local" .DNSIPs .KubeletFeatureGates .KubeletConfigs | indent 4 }}
 
 - path: /etc/systemd/system/kubelet-healthcheck.service
   permissions: "0644"

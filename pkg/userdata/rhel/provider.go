@@ -225,7 +225,15 @@ write_files:
       {{- if eq .CloudProviderName "vsphere" }}
       open-vm-tools \
       {{- end }}
+      {{- if eq .CloudProviderName "nutanix" }}
+      iscsi-initiator-utils \
+      {{- end }}
       ipvsadm
+    
+    {{- /* iscsid service is required on Nutanix machines for CSI driver to attach volumes. */}}
+    {{- if eq .CloudProviderName "nutanix" }}
+    systemctl enable --now iscsid
+    {{ end }}
 {{ .ContainerRuntimeScript | indent 4 }}
 {{ safeDownloadBinariesScript .KubeletVersion | indent 4 }}
     # set kubelet nodeip environment variable
@@ -258,7 +266,7 @@ write_files:
 
 - path: "/etc/systemd/system/kubelet.service"
   content: |
-{{ kubeletSystemdUnit .ContainerRuntimeName .KubeletVersion .CloudProviderName .MachineSpec.Name .DNSIPs .ExternalCloudProvider .PauseImage .MachineSpec.Taints .ExtraKubeletFlags | indent 4 }}
+{{ kubeletSystemdUnit .ContainerRuntimeName .KubeletVersion .KubeletCloudProviderName .MachineSpec.Name .DNSIPs .ExternalCloudProvider .PauseImage .MachineSpec.Taints .ExtraKubeletFlags | indent 4 }}
 
 - path: "/etc/kubernetes/cloud-config"
   permissions: "0600"
@@ -277,7 +285,7 @@ write_files:
 
 - path: "/etc/kubernetes/kubelet.conf"
   content: |
-{{ kubeletConfiguration "cluster.local" .DNSIPs .KubeletFeatureGates | indent 4 }}
+{{ kubeletConfiguration "cluster.local" .DNSIPs .KubeletFeatureGates .KubeletConfigs | indent 4 }}
 
 - path: "/etc/kubernetes/pki/ca.crt"
   content: |

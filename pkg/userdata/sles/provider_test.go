@@ -93,7 +93,7 @@ kPe6XoSbiLm/kxk32T0=
 )
 
 const (
-	defaultVersion = "1.21.5"
+	defaultVersion = "1.22.5"
 )
 
 type fakeCloudConfigProvider struct {
@@ -119,17 +119,17 @@ type userDataTestCase struct {
 	httpProxy             string
 	noProxy               string
 	insecureRegistries    []string
-	registryMirrors       []string
+	registryMirrors       map[string][]string
 	pauseImage            string
 	containerruntime      string
 }
 
 func simpleVersionTests() []userDataTestCase {
 	versions := []*semver.Version{
-		semver.MustParse("v1.19.15"),
-		semver.MustParse("v1.20.11"),
-		semver.MustParse("v1.21.5"),
-		semver.MustParse("v1.22.2"),
+		semver.MustParse("v1.20.14"),
+		semver.MustParse("v1.21.8"),
+		semver.MustParse("v1.22.5"),
+		semver.MustParse("v1.23.0"),
 	}
 
 	var tests []userDataTestCase
@@ -350,7 +350,7 @@ func TestUserDataGeneration(t *testing.T) {
 			},
 			httpProxy:       "http://192.168.100.100:3128",
 			noProxy:         "192.168.1.0",
-			registryMirrors: []string{"https://registry.docker-cn.com"},
+			registryMirrors: map[string][]string{"docker.io": {"https://registry.docker-cn.com"}},
 			pauseImage:      "192.168.100.100:5000/kubernetes/pause:v3.1",
 		},
 		{
@@ -438,16 +438,17 @@ func TestUserDataGeneration(t *testing.T) {
 			}
 
 			req := plugin.UserDataRequest{
-				MachineSpec:           test.spec,
-				Kubeconfig:            kubeconfig,
-				CloudConfig:           cloudConfig,
-				CloudProviderName:     cloudProviderName,
-				DNSIPs:                test.DNSIPs,
-				ExternalCloudProvider: test.externalCloudProvider,
-				HTTPProxy:             test.httpProxy,
-				NoProxy:               test.noProxy,
-				PauseImage:            test.pauseImage,
-				KubeletFeatureGates:   kubeletFeatureGates,
+				MachineSpec:              test.spec,
+				Kubeconfig:               kubeconfig,
+				CloudConfig:              cloudConfig,
+				CloudProviderName:        cloudProviderName,
+				KubeletCloudProviderName: cloudProviderName,
+				DNSIPs:                   test.DNSIPs,
+				ExternalCloudProvider:    test.externalCloudProvider,
+				HTTPProxy:                test.httpProxy,
+				NoProxy:                  test.noProxy,
+				PauseImage:               test.pauseImage,
+				KubeletFeatureGates:      kubeletFeatureGates,
 				ContainerRuntime: containerruntime.Get(
 					test.containerruntime,
 					containerruntime.WithInsecureRegistries(test.insecureRegistries),

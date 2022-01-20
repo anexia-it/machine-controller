@@ -43,9 +43,15 @@ func WithInsecureRegistries(registries []string) Opt {
 	}
 }
 
-func WithRegistryMirrors(mirrors []string) Opt {
+func WithRegistryMirrors(mirrors map[string][]string) Opt {
 	return func(cfg *Config) {
 		cfg.RegistryMirrors = mirrors
+	}
+}
+
+func WithRegistryCredentials(auth map[string]AuthConfig) Opt {
+	return func(cfg *Config) {
+		cfg.RegistryCredentials = auth
 	}
 }
 
@@ -78,11 +84,12 @@ func Get(containerRuntimeName string, opts ...Opt) Config {
 }
 
 type Config struct {
-	Docker             *Docker     `json:",omitempty"`
-	Containerd         *Containerd `json:",omitempty"`
-	InsecureRegistries []string    `json:",omitempty"`
-	RegistryMirrors    []string    `json:",omitempty"`
-	SandboxImage       string      `json:",omitempty"`
+	Docker              *Docker               `json:",omitempty"`
+	Containerd          *Containerd           `json:",omitempty"`
+	InsecureRegistries  []string              `json:",omitempty"`
+	RegistryMirrors     map[string][]string   `json:",omitempty"`
+	RegistryCredentials map[string]AuthConfig `json:",omitempty"`
+	SandboxImage        string                `json:",omitempty"`
 }
 
 func (cfg Config) String() string {
@@ -97,23 +104,22 @@ func (cfg Config) String() string {
 }
 
 func (cfg Config) Engine(kubeletVersion *semver.Version) Engine {
-	var (
-		docker = &Docker{
-			insecureRegistries: cfg.InsecureRegistries,
-			registryMirrors:    cfg.RegistryMirrors,
-			kubeletVersion:     kubeletVersion,
-		}
-		containerd = &Containerd{
-			insecureRegistries: cfg.InsecureRegistries,
-			registryMirrors:    cfg.RegistryMirrors,
-			sandboxImage:       cfg.SandboxImage,
-		}
-	)
+	docker := &Docker{
+		insecureRegistries: cfg.InsecureRegistries,
+		registryMirrors:    cfg.RegistryMirrors["docker.io"],
+	}
 
-	moreThan122, _ := semver.NewConstraint(">= 1.22")
+	containerd := &Containerd{
+		insecureRegistries:  cfg.InsecureRegistries,
+		registryMirrors:     cfg.RegistryMirrors,
+		sandboxImage:        cfg.SandboxImage,
+		registryCredentials: cfg.RegistryCredentials,
+	}
+
+	moreThan124, _ := semver.NewConstraint(">= 1.24")
 
 	switch {
-	case moreThan122.Check(kubeletVersion):
+	case moreThan124.Check(kubeletVersion):
 		return containerd
 	case cfg.Docker != nil:
 		return docker
