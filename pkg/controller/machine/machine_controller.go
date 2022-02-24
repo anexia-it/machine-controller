@@ -18,7 +18,6 @@ package controller
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -718,7 +717,7 @@ func (r *Reconciler) ensureInstanceExistsForMachine(
 
 			// grab kubelet general options from the annotations
 			kubeletFlags := common.GetKubeletFlags(machine.GetAnnotations())
-			KubeletConfigs := common.GetKubeletConfigs(machine.GetAnnotations())
+			kubeletConfigs := common.GetKubeletConfigs(machine.GetAnnotations())
 
 			// look up for ExternalCloudProvider feature, with fallback to command-line input
 			externalCloudProvider := r.nodeSettings.ExternalCloudProvider
@@ -726,26 +725,21 @@ func (r *Reconciler) ensureInstanceExistsForMachine(
 				externalCloudProvider, _ = strconv.ParseBool(val)
 			}
 
-			registryCredentials := map[string]containerruntime.AuthConfig{}
-
-			if secRef := strings.SplitN(r.nodeSettings.RegistryCredentialsSecretRef, "/", 2); len(secRef) == 2 {
-				var credsSecret corev1.Secret
-				err := r.client.Get(ctx, types.NamespacedName{Namespace: secRef[0], Name: secRef[1]}, &credsSecret)
-				if err != nil {
-					return nil, fmt.Errorf("failed to retrieve registry credentials secret object: %w", err)
-				}
-
-				for registry, data := range credsSecret.Data {
-					var regCred containerruntime.AuthConfig
-					if err := json.Unmarshal(data, &regCred); err != nil {
-						return nil, fmt.Errorf("failed to unmarshal registry credentials: %w", err)
-					}
-					registryCredentials[registry] = regCred
-				}
+			registryCredentials, err := containerruntime.GetContainerdAuthConfig(ctx, r.client, r.nodeSettings.RegistryCredentialsSecretRef)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get containerd auth config: %v", err)
 			}
 
 			crRuntime := r.nodeSettings.ContainerRuntime
 			crRuntime.RegistryCredentials = registryCredentials
+
+			if val, ok := kubeletConfigs[common.ContainerLogMaxSizeKubeletConfig]; ok {
+				crRuntime.ContainerLogMaxSize = val
+			}
+
+			if val, ok := kubeletConfigs[common.ContainerLogMaxFilesKubeletConfig]; ok {
+				crRuntime.ContainerLogMaxFiles = val
+			}
 
 			req := plugin.UserDataRequest{
 				MachineSpec:              machine.Spec,
@@ -757,7 +751,7 @@ func (r *Reconciler) ensureInstanceExistsForMachine(
 				PauseImage:               r.nodeSettings.PauseImage,
 				KubeletCloudProviderName: kubeletCloudProviderName,
 				KubeletFeatureGates:      kubeletFeatureGates,
-				KubeletConfigs:           KubeletConfigs,
+				KubeletConfigs:           kubeletConfigs,
 				NoProxy:                  r.nodeSettings.NoProxy,
 				HTTPProxy:                r.nodeSettings.HTTPProxy,
 				ContainerRuntime:         crRuntime,
@@ -774,8 +768,9 @@ func (r *Reconciler) ensureInstanceExistsForMachine(
 					return nil, fmt.Errorf("failed to find machine's MachineDployment: %v", err)
 				}
 
-				cloudConfigSecretName := fmt.Sprintf("%s-%s",
+				cloudConfigSecretName := fmt.Sprintf("%s-%s-%s",
 					referencedMachineDeployment,
+					machine.Namespace,
 					provisioningSuffix)
 
 				// It is important to check if the secret holding cloud-config exists
