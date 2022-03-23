@@ -42,7 +42,7 @@ import (
 
 const (
 	machineUIDTag   = "machine_uid"
-	centosImageName = "CentOS  7.7 64 bit"
+	centosImageName = "CentOS  7.9 64 bit"
 	ubuntuImageName = "Ubuntu  20.04 64 bit"
 
 	finalizerInstance = "kubermatic.io/cleanup-alibaba-instance"
@@ -198,7 +198,7 @@ func (p *provider) GetCloudConfig(spec clusterv1alpha1.MachineSpec) (config stri
 	return "", "", nil
 }
 
-func (p *provider) Create(machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData, userdata string) (instance.Instance, error) {
+func (p *provider) Create(machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData, userdata string, networkConfig *cloudprovidertypes.NetworkConfig) (instance.Instance, error) {
 	c, pc, err := p.getConfig(machine.Spec.ProviderSpec)
 	if err != nil {
 		return nil, cloudprovidererrors.TerminalError{
