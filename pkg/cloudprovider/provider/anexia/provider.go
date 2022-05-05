@@ -497,7 +497,7 @@ func (p *provider) SetMetricsForMachines(_ clusterv1alpha1.MachineList) error {
 func getClient(token string) (anxclient.Client, error) {
 	tokenOpt := anxclient.TokenFromString(token)
 	httpClient := cloudproviderutil.HTTPClientConfig{
-		Timeout:   30 * time.Second,
+		Timeout:   120 * time.Second,
 		LogPrefix: "[Anexia API]",
 	}.New()
 	return anxclient.New(tokenOpt, anxclient.HTTPClient(&httpClient))
