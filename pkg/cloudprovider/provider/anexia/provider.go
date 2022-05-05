@@ -80,7 +80,7 @@ func (p *provider) Create(machine *clusterv1alpha1.Machine, data *cloudprovidert
 		Machine:      machine,
 	})
 
-	client, err := getClient(config.Token)
+	client, err := getClient(config.Token, machine.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -380,7 +380,7 @@ func (p *provider) Get(machine *clusterv1alpha1.Machine, _ *cloudprovidertypes.P
 		return nil, newError(common.InvalidConfigurationMachineError, "failed to parse MachineSpec: %v", err)
 	}
 
-	cli, err := getClient(config.Token)
+	cli, err := getClient(config.Token, machine.Name)
 	if err != nil {
 		return nil, newError(common.InvalidConfigurationMachineError, "failed to create Anexia client: %v", err)
 	}
@@ -425,7 +425,7 @@ func (p *provider) Cleanup(machine *clusterv1alpha1.Machine, data *cloudprovider
 		return false, newError(common.InvalidConfigurationMachineError, "failed to parse MachineSpec: %v", err)
 	}
 
-	cli, err := getClient(config.Token)
+	cli, err := getClient(config.Token, machine.Name)
 	if err != nil {
 		return false, newError(common.InvalidConfigurationMachineError, "failed to create Anexia client: %v", err)
 	}
@@ -494,11 +494,11 @@ func (p *provider) SetMetricsForMachines(_ clusterv1alpha1.MachineList) error {
 	return nil
 }
 
-func getClient(token string) (anxclient.Client, error) {
+func getClient(token, vmName string) (anxclient.Client, error) {
 	tokenOpt := anxclient.TokenFromString(token)
 	httpClient := cloudproviderutil.HTTPClientConfig{
 		Timeout:   120 * time.Second,
-		LogPrefix: "[Anexia API]",
+		LogPrefix: fmt.Sprintf("[Anexia API for VM %q]", vmName),
 	}.New()
 	return anxclient.New(tokenOpt, anxclient.HTTPClient(&httpClient))
 }
