@@ -62,6 +62,10 @@ func (p *provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine,
 	status := getProviderStatus(machine)
 	klog.V(3).Infof(fmt.Sprintf("'%s' has status %#v", machine.Name, status))
 
+	if status.ProvisioningStart.IsZero() {
+		status.ProvisioningStart.Time = time.Now()
+	}
+
 	// ensure conditions are present on machine
 	ensureConditions(&status)
 
@@ -141,12 +145,12 @@ func provisionVM(ctx context.Context, client anxclient.Client) error {
 	ctx, cancel := context.WithTimeout(ctx, anxtypes.CreateRequestTimeout)
 	defer cancel()
 
+	config := reconcileContext.Config
 	status := reconcileContext.Status
 	if status.ProvisioningID == "" {
 		klog.V(2).Info(fmt.Sprintf("Machine '%s'  does not contain a provisioningID yet. Starting to provision",
 			reconcileContext.Machine.Name))
 
-		config := reconcileContext.Config
 		reservedIP, err := getIPAddress(ctx, client)
 		if err != nil {
 			return newError(common.CreateMachineError, "failed to reserve IP: %v", err)
@@ -206,6 +210,15 @@ func provisionVM(ctx context.Context, client anxclient.Client) error {
 		// something went wrong remove provisioning ID, so we can start from scratch
 		status.ProvisioningID = ""
 		return newError(common.CreateMachineError, "instance provisioning failed: %v", err)
+	}
+
+	if !status.ProvisioningStart.IsZero() {
+		duration := time.Now().Sub(status.ProvisioningStart.Time)
+
+		metricVMProvisioningDuration.WithLabelValues(
+			config.LocationID,
+			config.TemplateID,
+		).Observe(duration.Seconds())
 	}
 
 	status.InstanceID = instanceID
@@ -411,6 +424,11 @@ func (p *provider) GetCloudConfig(_ clusterv1alpha1.MachineSpec) (string, string
 
 func (p *provider) Cleanup(ctx context.Context, machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData) (isDeleted bool, retErr error) {
 	status := getProviderStatus(machine)
+
+	if status.DeprovisioningStart.IsZero() {
+		status.DeprovisioningStart.Time = time.Now()
+	}
+
 	// make sure status is reflected in Machine Object
 	defer func() {
 		// if error occurs during updating the machine object don't override the original error
@@ -449,7 +467,17 @@ func (p *provider) Cleanup(ctx context.Context, machine *clusterv1alpha1.Machine
 		status.DeprovisioningID = response.Identifier
 	}
 
-	return isTaskDone(deleteCtx, cli, status.DeprovisioningID)
+	done, err := isTaskDone(deleteCtx, cli, status.DeprovisioningID)
+
+	if err == nil && done && !status.DeprovisioningStart.IsZero() {
+		duration := time.Now().Sub(status.DeprovisioningStart.Time)
+
+		metricVMDeprovisioningDuration.WithLabelValues(
+			config.LocationID,
+		).Observe(duration.Seconds())
+	}
+
+	return done, err
 }
 
 func isTaskDone(ctx context.Context, cli anxclient.Client, progressIdentifier string) (bool, error) {
@@ -483,9 +511,13 @@ func (p *provider) SetMetricsForMachines(_ clusterv1alpha1.MachineList) error {
 }
 
 func getClient(token string) (anxclient.Client, error) {
-	tokenOpt := anxclient.TokenFromString(token)
-	client := anxclient.HTTPClient(&http.Client{Timeout: 30 * time.Second})
-	return anxclient.New(tokenOpt, client)
+	httpClient := http.Client{Timeout: 30 * time.Second}
+
+	return anxclient.New(
+		anxclient.TokenFromString(token),
+		anxclient.WithMetricReceiver(metricReceiver),
+		anxclient.HTTPClient(&httpClient),
+	)
 }
 
 func getProviderStatus(machine *clusterv1alpha1.Machine) anxtypes.ProviderStatus {
