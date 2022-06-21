@@ -63,6 +63,9 @@ type ProviderStatus struct {
 	ReservedIP       string         `json:"reservedIP"`
 	IPState          string         `json:"ipState"`
 	Conditions       []v1.Condition `json:"conditions,omitempty"`
+
+	ProvisioningStart   v1.Time `json:"provisioningStart,omitempty"`
+	DeprovisioningStart v1.Time `json:"deprovisioningStart,omitempty"`
 }
 
 type Config struct {
