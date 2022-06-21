@@ -44,6 +44,8 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	cloudproviderutil "github.com/kubermatic/machine-controller/pkg/cloudprovider/util"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -78,7 +80,7 @@ func (p *provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine,
 		Machine:      machine,
 	})
 
-	client, err := getClient(config.Token)
+	client, err := getClient(config.Token, machine.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -378,7 +380,7 @@ func (p *provider) Get(ctx context.Context, machine *clusterv1alpha1.Machine, _ 
 		return nil, newError(common.InvalidConfigurationMachineError, "failed to parse MachineSpec: %v", err)
 	}
 
-	cli, err := getClient(config.Token)
+	cli, err := getClient(config.Token, machine.Name)
 	if err != nil {
 		return nil, newError(common.InvalidConfigurationMachineError, "failed to create Anexia client: %v", err)
 	}
@@ -423,7 +425,7 @@ func (p *provider) Cleanup(ctx context.Context, machine *clusterv1alpha1.Machine
 		return false, newError(common.InvalidConfigurationMachineError, "failed to parse MachineSpec: %v", err)
 	}
 
-	cli, err := getClient(config.Token)
+	cli, err := getClient(config.Token, machine.Name)
 	if err != nil {
 		return false, newError(common.InvalidConfigurationMachineError, "failed to create Anexia client: %v", err)
 	}
@@ -482,10 +484,13 @@ func (p *provider) SetMetricsForMachines(_ clusterv1alpha1.MachineList) error {
 	return nil
 }
 
-func getClient(token string) (anxclient.Client, error) {
+func getClient(token, vmName string) (anxclient.Client, error) {
 	tokenOpt := anxclient.TokenFromString(token)
-	client := anxclient.HTTPClient(&http.Client{Timeout: 30 * time.Second})
-	return anxclient.New(tokenOpt, client)
+	httpClient := cloudproviderutil.HTTPClientConfig{
+		Timeout:   120 * time.Second,
+		LogPrefix: fmt.Sprintf("[Anexia API for VM %q]", vmName),
+	}.New()
+	return anxclient.New(tokenOpt, anxclient.HTTPClient(&httpClient))
 }
 
 func getProviderStatus(machine *clusterv1alpha1.Machine) anxtypes.ProviderStatus {
