@@ -30,7 +30,7 @@ import (
 	"github.com/kubermatic/machine-controller/pkg/providerconfig"
 
 	"k8s.io/utils/pointer"
-	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	fakectrlruntimeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 type vsphereProviderSpecConf struct {
@@ -169,14 +169,16 @@ func TestValidate(t *testing.T) {
 			password, _ := simulator.DefaultLogin.Password()
 			p := &provider{
 				// Note that configVarResolver is not used in this test as the getConfigFunc is mocked.
-				configVarResolver: providerconfig.NewConfigVarResolver(context.Background(), fakeclient.NewFakeClient()),
+				configVarResolver: providerconfig.NewConfigVarResolver(context.Background(), fakectrlruntimeclient.
+					NewClientBuilder().
+					Build()),
 			}
 			tt.args.User = username
 			tt.args.Password = password
 			tt.args.URL = vSphereURL
 			m := cloudprovidertesting.Creator{Name: "test", Namespace: "vsphere", ProviderSpecGetter: tt.args.rawProviderSpec}.
 				CreateMachine(t)
-			if err := p.Validate(m.Spec); (err != nil) != tt.wantErr {
+			if err := p.Validate(context.Background(), m.Spec); (err != nil) != tt.wantErr {
 				t.Errorf("provider.Validate() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})

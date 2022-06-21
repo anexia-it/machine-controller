@@ -40,35 +40,35 @@ type Provider struct{}
 func (p Provider) UserData(req plugin.UserDataRequest) (string, error) {
 	tmpl, err := template.New("user-data").Funcs(userdatahelper.TxtFuncMap()).Parse(userDataTemplate)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse user-data template: %v", err)
+		return "", fmt.Errorf("failed to parse user-data template: %w", err)
 	}
 
 	kubeletVersion, err := semver.NewVersion(req.MachineSpec.Versions.Kubelet)
 	if err != nil {
-		return "", fmt.Errorf("invalid kubelet version: %v", err)
+		return "", fmt.Errorf("invalid kubelet version: %w", err)
 	}
 
 	pconfig, err := providerconfigtypes.GetConfig(req.MachineSpec.ProviderSpec)
 	if err != nil {
-		return "", fmt.Errorf("failed to get providerSpec: %v", err)
+		return "", fmt.Errorf("failed to get providerSpec: %w", err)
 	}
 
 	if pconfig.OverwriteCloudConfig != nil {
 		req.CloudConfig = *pconfig.OverwriteCloudConfig
 	}
 
-	if pconfig.Network != nil {
+	if pconfig.Network.IsStaticIPConfig() {
 		return "", errors.New("static IP config is not supported with Ubuntu")
 	}
 
 	ubuntuConfig, err := LoadConfig(pconfig.OperatingSystemSpec)
 	if err != nil {
-		return "", fmt.Errorf("failed to get ubuntu config from provider config: %v", err)
+		return "", fmt.Errorf("failed to get ubuntu config from provider config: %w", err)
 	}
 
 	serverAddr, err := userdatahelper.GetServerAddressFromKubeconfig(req.Kubeconfig)
 	if err != nil {
-		return "", fmt.Errorf("error extracting server address from kubeconfig: %v", err)
+		return "", fmt.Errorf("error extracting server address from kubeconfig: %w", err)
 	}
 
 	kubeconfigString, err := userdatahelper.StringifyKubeconfig(req.Kubeconfig)
@@ -78,7 +78,7 @@ func (p Provider) UserData(req plugin.UserDataRequest) (string, error) {
 
 	kubernetesCACert, err := userdatahelper.GetCACert(req.Kubeconfig)
 	if err != nil {
-		return "", fmt.Errorf("error extracting cacert: %v", err)
+		return "", fmt.Errorf("error extracting cacert: %w", err)
 	}
 
 	crEngine := req.ContainerRuntime.Engine(kubeletVersion)
@@ -91,34 +91,44 @@ func (p Provider) UserData(req plugin.UserDataRequest) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to generate container runtime config: %w", err)
 	}
+
+	crAuthConfig, err := crEngine.AuthConfig()
+	if err != nil {
+		return "", fmt.Errorf("failed to generate container runtime auth config: %w", err)
+	}
+
 	data := struct {
 		plugin.UserDataRequest
-		ProviderSpec                   *providerconfigtypes.Config
-		OSConfig                       *Config
-		ServerAddr                     string
-		KubeletVersion                 string
-		Kubeconfig                     string
-		KubernetesCACert               string
-		NodeIPScript                   string
-		ExtraKubeletFlags              []string
-		ContainerRuntimeScript         string
-		ContainerRuntimeConfigFileName string
-		ContainerRuntimeConfig         string
-		ContainerRuntimeName           string
+		ProviderSpec                       *providerconfigtypes.Config
+		OSConfig                           *Config
+		ServerAddr                         string
+		KubeletVersion                     string
+		Kubeconfig                         string
+		KubernetesCACert                   string
+		NodeIPScript                       string
+		ExtraKubeletFlags                  []string
+		ContainerRuntimeScript             string
+		ContainerRuntimeConfigFileName     string
+		ContainerRuntimeConfig             string
+		ContainerRuntimeAuthConfigFileName string
+		ContainerRuntimeAuthConfig         string
+		ContainerRuntimeName               string
 	}{
-		UserDataRequest:                req,
-		ProviderSpec:                   pconfig,
-		OSConfig:                       ubuntuConfig,
-		ServerAddr:                     serverAddr,
-		KubeletVersion:                 kubeletVersion.String(),
-		Kubeconfig:                     kubeconfigString,
-		KubernetesCACert:               kubernetesCACert,
-		NodeIPScript:                   userdatahelper.SetupNodeIPEnvScript(),
-		ExtraKubeletFlags:              crEngine.KubeletFlags(),
-		ContainerRuntimeScript:         crScript,
-		ContainerRuntimeConfigFileName: crEngine.ConfigFileName(),
-		ContainerRuntimeConfig:         crConfig,
-		ContainerRuntimeName:           crEngine.String(),
+		UserDataRequest:                    req,
+		ProviderSpec:                       pconfig,
+		OSConfig:                           ubuntuConfig,
+		ServerAddr:                         serverAddr,
+		KubeletVersion:                     kubeletVersion.String(),
+		Kubeconfig:                         kubeconfigString,
+		KubernetesCACert:                   kubernetesCACert,
+		NodeIPScript:                       userdatahelper.SetupNodeIPEnvScript(),
+		ExtraKubeletFlags:                  crEngine.KubeletFlags(),
+		ContainerRuntimeScript:             crScript,
+		ContainerRuntimeConfigFileName:     crEngine.ConfigFileName(),
+		ContainerRuntimeConfig:             crConfig,
+		ContainerRuntimeAuthConfigFileName: crEngine.AuthConfigFileName(),
+		ContainerRuntimeAuthConfig:         crAuthConfig,
+		ContainerRuntimeName:               crEngine.String(),
 	}
 
 	var buf strings.Builder
@@ -188,11 +198,6 @@ write_files:
 {{- /* As we added some modules and don't want to reboot, restart the service */}}
     systemctl restart systemd-modules-load.service
     sysctl --system
-
-{{- /* Make sure we always disable swap - Otherwise the kubelet won't start'. */}}
-    sed -i.orig '/.*swap.*/d' /etc/fstab
-    swapoff -a
-
     apt-get update
 
     DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" install -y \
@@ -212,7 +217,7 @@ write_files:
       nfs-common \
       socat \
       util-linux \
-      {{- if eq .CloudProviderName "vsphere" }}
+      {{- if or (eq .CloudProviderName "vsphere") (eq .CloudProviderName "vmware-cloud-director") }}
       open-vm-tools \
       {{- end }}
       {{- if eq .CloudProviderName "nutanix" }}
@@ -243,6 +248,10 @@ write_files:
 
     systemctl enable --now kubelet
     systemctl enable --now --no-block kubelet-healthcheck.service
+    {{- if eq .CloudProviderName "kubevirt" }}
+    systemctl enable --now --no-block restart-kubelet.service
+    {{ end }}
+    systemctl disable setup.service
 
 - path: "/opt/bin/supervise.sh"
   permissions: "0755"
@@ -253,9 +262,15 @@ write_files:
       sleep 1
     done
 
+- path: "/opt/disable-swap.sh"
+  permissions: "0755"
+  content: |
+    sed -i.orig '/.*swap.*/d' /etc/fstab
+    swapoff -a
+
 - path: "/etc/systemd/system/kubelet.service"
   content: |
-{{ kubeletSystemdUnit .ContainerRuntimeName .KubeletVersion .KubeletCloudProviderName .MachineSpec.Name .DNSIPs .ExternalCloudProvider .PauseImage .MachineSpec.Taints .ExtraKubeletFlags | indent 4 }}
+{{ kubeletSystemdUnit .ContainerRuntimeName .KubeletVersion .KubeletCloudProviderName .MachineSpec.Name .DNSIPs .ExternalCloudProvider .PauseImage .MachineSpec.Taints .ExtraKubeletFlags true | indent 4 }}
 
 - path: "/etc/systemd/system/kubelet.service.d/extras.conf"
   content: |
@@ -307,6 +322,14 @@ write_files:
   content: |
 {{ .ContainerRuntimeConfig | indent 4 }}
 
+{{- if and (eq .ContainerRuntimeName "docker") .ContainerRuntimeAuthConfig }}
+
+- path: {{ .ContainerRuntimeAuthConfigFileName }}
+  permissions: "0600"
+  content: |
+{{ .ContainerRuntimeAuthConfig | indent 4 }}
+{{- end }}
+
 - path: "/etc/kubernetes/kubelet.conf"
   content: |
 {{ kubeletConfiguration "cluster.local" .DNSIPs .KubeletFeatureGates .KubeletConfigs .ContainerRuntimeName | indent 4 }}
@@ -328,6 +351,42 @@ write_files:
   append: true
 {{- end }}
 
+{{- if eq .CloudProviderName "kubevirt" }}
+- path: "/opt/bin/restart-kubelet.sh"
+  permissions: "0744"
+  content: |
+    #!/bin/bash
+    # Needed for Kubevirt provider because if the virt-launcher pod is deleted,
+    # the VM and DataVolume states are kept and VM is rebooted. We need to restart the kubelet
+    # with the new config (new IP) and run this at every boot.
+    set -xeuo pipefail
+
+    # This helps us avoid an unnecessary restart for kubelet on the first boot
+    if [ -f /etc/kubelet_needs_restart ]; then
+      # restart kubelet since it's not the first boot
+      systemctl daemon-reload
+      systemctl restart kubelet.service
+    else
+      touch /etc/kubelet_needs_restart
+    fi
+
+- path: "/etc/systemd/system/restart-kubelet.service"
+  permissions: "0644"
+  content: |
+    [Unit]
+    Requires=kubelet.service
+    After=kubelet.service
+
+    Description=Service responsible for restarting kubelet when the machine is rebooted
+
+    [Service]
+    Type=oneshot
+    ExecStart=/opt/bin/restart-kubelet.sh
+
+    [Install]
+    WantedBy=multi-user.target
+{{- end }}
+
 runcmd:
-- systemctl start setup.service
+- systemctl enable --now setup.service
 `

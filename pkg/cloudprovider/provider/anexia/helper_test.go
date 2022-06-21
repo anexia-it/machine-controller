@@ -21,11 +21,13 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/anexia-it/go-anxcloud/pkg/vsphere/search"
 	"github.com/gophercloud/gophercloud/testhelper"
+	"go.anx.io/go-anxcloud/pkg/vsphere/search"
+
 	"github.com/kubermatic/machine-controller/pkg/apis/cluster/v1alpha1"
 	anxtypes "github.com/kubermatic/machine-controller/pkg/cloudprovider/provider/anexia/types"
 	"github.com/kubermatic/machine-controller/pkg/providerconfig/types"
+
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
@@ -40,7 +42,6 @@ type ValidateCallTestCase struct {
 }
 
 func getSpecsForValidationTest(t *testing.T, configCases []ConfigTestCase) []ValidateCallTestCase {
-
 	var testCases []ValidateCallTestCase
 
 	for _, configCase := range configCases {

@@ -50,7 +50,7 @@ type provider struct {
 	configVarResolver *providerconfig.ConfigVarResolver
 }
 
-// New returns a Hetzner provider
+// New returns a Hetzner provider.
 func New(configVarResolver *providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
 	return &provider{configVarResolver: configVarResolver}
 }
@@ -73,6 +73,8 @@ func getNameForOS(os providerconfigtypes.OperatingSystem) (string, error) {
 		return "ubuntu-20.04", nil
 	case providerconfigtypes.OperatingSystemCentOS:
 		return "centos-7", nil
+	case providerconfigtypes.OperatingSystemRockyLinux:
+		return "rocky-8", nil
 	}
 	return "", providerconfigtypes.ErrOSNotSupported
 }
@@ -103,7 +105,7 @@ func (p *provider) getConfig(provSpec clusterv1alpha1.ProviderSpec) (*Config, *p
 	c := Config{}
 	c.Token, err = p.configVarResolver.GetConfigVarStringValueOrEnv(rawConfig.Token, "HZ_TOKEN")
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get the value of \"token\" field, error = %v", err)
+		return nil, nil, fmt.Errorf("failed to get the value of \"token\" field, error = %w", err)
 	}
 
 	c.ServerType, err = p.configVarResolver.GetConfigVarStringValue(rawConfig.ServerType)
@@ -182,10 +184,10 @@ func (p *provider) getServerPlacementGroup(ctx context.Context, client *hcloud.C
 	return createdPg.PlacementGroup, nil
 }
 
-func (p *provider) Validate(spec clusterv1alpha1.MachineSpec) error {
+func (p *provider) Validate(ctx context.Context, spec clusterv1alpha1.MachineSpec) error {
 	c, pc, err := p.getConfig(spec.ProviderSpec)
 	if err != nil {
-		return fmt.Errorf("failed to parse config: %v", err)
+		return fmt.Errorf("failed to parse config: %w", err)
 	}
 
 	if c.Token == "" {
@@ -194,10 +196,9 @@ func (p *provider) Validate(spec clusterv1alpha1.MachineSpec) error {
 
 	_, err = getNameForOS(pc.OperatingSystem)
 	if err != nil {
-		return fmt.Errorf("invalid/not supported operating system specified %q: %v", pc.OperatingSystem, err)
+		return fmt.Errorf("invalid/not supported operating system specified %q: %w", pc.OperatingSystem, err)
 	}
 
-	ctx := context.TODO()
 	client := getClient(c.Token)
 
 	if c.Location != "" && c.Datacenter != "" {
@@ -206,32 +207,32 @@ func (p *provider) Validate(spec clusterv1alpha1.MachineSpec) error {
 
 	if c.Location != "" {
 		if _, _, err = client.Location.Get(ctx, c.Location); err != nil {
-			return fmt.Errorf("failed to get location: %v", err)
+			return fmt.Errorf("failed to get location: %w", err)
 		}
 	}
 
 	if c.Datacenter != "" {
 		if _, _, err = client.Datacenter.Get(ctx, c.Datacenter); err != nil {
-			return fmt.Errorf("failed to get datacenter: %v", err)
+			return fmt.Errorf("failed to get datacenter: %w", err)
 		}
 	}
 
 	if c.Image != "" {
 		if _, _, err = client.Image.Get(ctx, c.Image); err != nil {
-			return fmt.Errorf("failed to get image: %v", err)
+			return fmt.Errorf("failed to get image: %w", err)
 		}
 	}
 
 	for _, network := range c.Networks {
 		if _, _, err = client.Network.Get(ctx, network); err != nil {
-			return fmt.Errorf("failed to get network %q: %v", network, err)
+			return fmt.Errorf("failed to get network %q: %w", network, err)
 		}
 	}
 
 	for _, firewall := range c.Firewalls {
 		f, _, err := client.Firewall.Get(ctx, firewall)
 		if err != nil {
-			return fmt.Errorf("failed to get firewall %q: %v", firewall, err)
+			return fmt.Errorf("failed to get firewall %q: %w", firewall, err)
 		}
 		if f == nil {
 			return fmt.Errorf("firewall %q does not exist", firewall)
@@ -239,13 +240,13 @@ func (p *provider) Validate(spec clusterv1alpha1.MachineSpec) error {
 	}
 
 	if _, _, err = client.ServerType.Get(ctx, c.ServerType); err != nil {
-		return fmt.Errorf("failed to get server type: %v", err)
+		return fmt.Errorf("failed to get server type: %w", err)
 	}
 
 	return nil
 }
 
-func (p *provider) Create(machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData, userdata string) (instance.Instance, error) {
+func (p *provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData, userdata string) (instance.Instance, error) {
 	c, pc, err := p.getConfig(machine.Spec.ProviderSpec)
 	if err != nil {
 		return nil, cloudprovidererrors.TerminalError{
@@ -254,7 +255,6 @@ func (p *provider) Create(machine *clusterv1alpha1.Machine, data *cloudprovidert
 		}
 	}
 
-	ctx := context.TODO()
 	client := getClient(c.Token)
 
 	if c.Image == "" {
@@ -354,7 +354,7 @@ func (p *provider) Create(machine *clusterv1alpha1.Machine, data *cloudprovidert
 	// spammy. No one will ever get access to the private key.
 	sshkey, err := ssh.NewKey()
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate ssh key: %v", err)
+		return nil, fmt.Errorf("failed to generate ssh key: %w", err)
 	}
 
 	hkey, res, err := client.SSHKey.Create(ctx, hcloud.SSHKeyCreateOpts{
@@ -362,7 +362,7 @@ func (p *provider) Create(machine *clusterv1alpha1.Machine, data *cloudprovidert
 		PublicKey: sshkey.PublicKey,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("creating temporary ssh key failed with error %v", err)
+		return nil, fmt.Errorf("creating temporary ssh key failed with error %w", err)
 	}
 	if res.StatusCode != http.StatusCreated {
 		return nil, fmt.Errorf("got invalid http status code when creating ssh key: expected=%d, god=%d", http.StatusCreated, res.StatusCode)
@@ -386,10 +386,10 @@ func (p *provider) Create(machine *clusterv1alpha1.Machine, data *cloudprovidert
 	return &hetznerServer{server: serverCreateRes.Server}, nil
 }
 
-func (p *provider) Cleanup(machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData) (bool, error) {
-	instance, err := p.Get(machine, data)
+func (p *provider) Cleanup(ctx context.Context, machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData) (bool, error) {
+	instance, err := p.Get(ctx, machine, data)
 	if err != nil {
-		if err == cloudprovidererrors.ErrInstanceNotFound {
+		if errors.Is(err, cloudprovidererrors.ErrInstanceNotFound) {
 			return true, nil
 		}
 		return false, err
@@ -403,7 +403,6 @@ func (p *provider) Cleanup(machine *clusterv1alpha1.Machine, data *cloudprovider
 		}
 	}
 
-	ctx := context.TODO()
 	client := getClient(c.Token)
 	hzServer := instance.(*hetznerServer).server
 
@@ -441,7 +440,7 @@ func (p *provider) AddDefaults(spec clusterv1alpha1.MachineSpec) (clusterv1alpha
 	return spec, nil
 }
 
-func (p *provider) Get(machine *clusterv1alpha1.Machine, _ *cloudprovidertypes.ProviderData) (instance.Instance, error) {
+func (p *provider) Get(ctx context.Context, machine *clusterv1alpha1.Machine, _ *cloudprovidertypes.ProviderData) (instance.Instance, error) {
 	c, _, err := p.getConfig(machine.Spec.ProviderSpec)
 	if err != nil {
 		return nil, cloudprovidererrors.TerminalError{
@@ -450,7 +449,6 @@ func (p *provider) Get(machine *clusterv1alpha1.Machine, _ *cloudprovidertypes.P
 		}
 	}
 
-	ctx := context.TODO()
 	client := getClient(c.Token)
 
 	servers, _, err := client.Server.List(ctx, hcloud.ServerListOpts{ListOpts: hcloud.ListOpts{
@@ -469,10 +467,7 @@ func (p *provider) Get(machine *clusterv1alpha1.Machine, _ *cloudprovidertypes.P
 	return nil, cloudprovidererrors.ErrInstanceNotFound
 }
 
-func (p *provider) MigrateUID(machine *clusterv1alpha1.Machine, new types.UID) error {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
+func (p *provider) MigrateUID(ctx context.Context, machine *clusterv1alpha1.Machine, newUID types.UID) error {
 	c, _, err := p.getConfig(machine.Spec.ProviderSpec)
 	if err != nil {
 		return cloudprovidererrors.TerminalError{
@@ -485,7 +480,7 @@ func (p *provider) MigrateUID(machine *clusterv1alpha1.Machine, new types.UID) e
 	// We didn't use the UID for Hetzner before
 	server, _, err := client.Server.Get(ctx, machine.Spec.Name)
 	if err != nil {
-		return fmt.Errorf("failed to get server: %v", err)
+		return fmt.Errorf("failed to get server: %w", err)
 	}
 	if server == nil {
 		klog.Infof("No instance exists for machine %s", machine.Name)
@@ -494,10 +489,10 @@ func (p *provider) MigrateUID(machine *clusterv1alpha1.Machine, new types.UID) e
 
 	klog.Infof("Setting UID label for machine %s", machine.Name)
 	_, response, err := client.Server.Update(ctx, server, hcloud.ServerUpdateOpts{
-		Labels: map[string]string{machineUIDLabelKey: string(new)},
+		Labels: map[string]string{machineUIDLabelKey: string(newUID)},
 	})
 	if err != nil {
-		return fmt.Errorf("failed to update UID label: %v", err)
+		return fmt.Errorf("failed to update UID label: %w", err)
 	}
 	if response.Response.StatusCode != http.StatusOK {
 		return fmt.Errorf("got unexpected response code %v, expected %v", response.Response.Status, http.StatusOK)
@@ -565,10 +560,10 @@ func (s *hetznerServer) Status() instance.Status {
 // hzErrorToTerminalError judges if the given error
 // can be qualified as a "terminal" error, for more info see v1alpha1.MachineStatus
 //
-// if the given error doesn't qualify the error passed as an argument will be returned
+// if the given error doesn't qualify the error passed as an argument will be returned.
 func hzErrorToTerminalError(err error, msg string) error {
 	prepareAndReturnError := func() error {
-		return fmt.Errorf("%s, due to %s", msg, err)
+		return fmt.Errorf("%s, due to %w", msg, err)
 	}
 
 	if err != nil {

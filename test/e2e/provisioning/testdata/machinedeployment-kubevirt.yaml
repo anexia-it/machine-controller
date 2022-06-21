@@ -34,9 +34,9 @@ spec:
                 cpus: "1"
                 memory: "4096M"
                 primaryDisk:
-                  osImage: http://10.107.208.71/<< OS_NAME >>.img
-                  size: "10Gi"
-                  storageClassName: local-path
+                  osImage: http://image-repo.kube-system.svc.cluster.local/images/<< OS_NAME >>.img
+                  size: "25Gi"
+                  storageClassName: longhorn
               dnsPolicy: "None"
               dnsConfig:
                 nameservers:

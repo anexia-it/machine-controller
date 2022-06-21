@@ -40,7 +40,7 @@ type Provider struct{}
 func (p Provider) UserData(req plugin.UserDataRequest) (string, error) {
 	pconfig, err := providerconfigtypes.GetConfig(req.MachineSpec.ProviderSpec)
 	if err != nil {
-		return "", fmt.Errorf("failed to get provider config: %v", err)
+		return "", fmt.Errorf("failed to get provider config: %w", err)
 	}
 
 	if pconfig.OverwriteCloudConfig != nil {
@@ -49,22 +49,22 @@ func (p Provider) UserData(req plugin.UserDataRequest) (string, error) {
 
 	flatcarConfig, err := LoadConfig(pconfig.OperatingSystemSpec)
 	if err != nil {
-		return "", fmt.Errorf("failed to get flatcar config from provider config: %v", err)
+		return "", fmt.Errorf("failed to get flatcar config from provider config: %w", err)
 	}
 
 	userDataTemplate, err := getUserDataTemplate(flatcarConfig.ProvisioningUtility)
 	if err != nil {
-		return "", fmt.Errorf("failed to get an appropriate user-data template: %v", err)
+		return "", fmt.Errorf("failed to get an appropriate user-data template: %w", err)
 	}
 
 	tmpl, err := template.New("user-data").Funcs(userdatahelper.TxtFuncMap()).Parse(userDataTemplate)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse user-data template: %v", err)
+		return "", fmt.Errorf("failed to parse user-data template: %w", err)
 	}
 
 	kubeletVersion, err := semver.NewVersion(req.MachineSpec.Versions.Kubelet)
 	if err != nil {
-		return "", fmt.Errorf("invalid kubelet version: %v", err)
+		return "", fmt.Errorf("invalid kubelet version: %w", err)
 	}
 
 	kubeconfigString, err := userdatahelper.StringifyKubeconfig(req.Kubeconfig)
@@ -74,7 +74,7 @@ func (p Provider) UserData(req plugin.UserDataRequest) (string, error) {
 
 	kubernetesCACert, err := userdatahelper.GetCACert(req.Kubeconfig)
 	if err != nil {
-		return "", fmt.Errorf("error extracting cacert: %v", err)
+		return "", fmt.Errorf("error extracting cacert: %w", err)
 	}
 
 	if flatcarConfig.DisableAutoUpdate {
@@ -93,43 +93,52 @@ func (p Provider) UserData(req plugin.UserDataRequest) (string, error) {
 		return "", fmt.Errorf("failed to generate container runtime config: %w", err)
 	}
 
+	crAuthConfig, err := crEngine.AuthConfig()
+	if err != nil {
+		return "", fmt.Errorf("failed to generate container runtime auth config: %w", err)
+	}
+
 	data := struct {
 		plugin.UserDataRequest
-		ProviderSpec                   *providerconfigtypes.Config
-		FlatcarConfig                  *Config
-		Kubeconfig                     string
-		KubernetesCACert               string
-		KubeletVersion                 string
-		NodeIPScript                   string
-		ExtraKubeletFlags              []string
-		ContainerRuntimeScript         string
-		ContainerRuntimeConfigFileName string
-		ContainerRuntimeConfig         string
-		ContainerRuntimeName           string
+		ProviderSpec                       *providerconfigtypes.Config
+		FlatcarConfig                      *Config
+		KubeletVersion                     string
+		Kubeconfig                         string
+		KubernetesCACert                   string
+		NodeIPScript                       string
+		ExtraKubeletFlags                  []string
+		ContainerRuntimeScript             string
+		ContainerRuntimeConfigFileName     string
+		ContainerRuntimeConfig             string
+		ContainerRuntimeAuthConfigFileName string
+		ContainerRuntimeAuthConfig         string
+		ContainerRuntimeName               string
 	}{
-		UserDataRequest:                req,
-		ProviderSpec:                   pconfig,
-		FlatcarConfig:                  flatcarConfig,
-		Kubeconfig:                     kubeconfigString,
-		KubernetesCACert:               kubernetesCACert,
-		KubeletVersion:                 kubeletVersion.String(),
-		NodeIPScript:                   userdatahelper.SetupNodeIPEnvScript(),
-		ExtraKubeletFlags:              crEngine.KubeletFlags(),
-		ContainerRuntimeScript:         crScript,
-		ContainerRuntimeConfigFileName: crEngine.ConfigFileName(),
-		ContainerRuntimeConfig:         crConfig,
-		ContainerRuntimeName:           crEngine.String(),
+		UserDataRequest:                    req,
+		ProviderSpec:                       pconfig,
+		FlatcarConfig:                      flatcarConfig,
+		KubeletVersion:                     kubeletVersion.String(),
+		Kubeconfig:                         kubeconfigString,
+		KubernetesCACert:                   kubernetesCACert,
+		NodeIPScript:                       userdatahelper.SetupNodeIPEnvScript(),
+		ExtraKubeletFlags:                  crEngine.KubeletFlags(),
+		ContainerRuntimeScript:             crScript,
+		ContainerRuntimeConfigFileName:     crEngine.ConfigFileName(),
+		ContainerRuntimeConfig:             crConfig,
+		ContainerRuntimeAuthConfigFileName: crEngine.AuthConfigFileName(),
+		ContainerRuntimeAuthConfig:         crAuthConfig,
+		ContainerRuntimeName:               crEngine.String(),
 	}
 
 	b := &bytes.Buffer{}
 	err = tmpl.Execute(b, data)
 	if err != nil {
-		return "", fmt.Errorf("failed to execute user-data template: %v", err)
+		return "", fmt.Errorf("failed to execute user-data template: %w", err)
 	}
 
 	out, err := userdatahelper.CleanupTemplateOutput(b.String())
 	if err != nil {
-		return "", fmt.Errorf("failed to cleanup user-data template: %v", err)
+		return "", fmt.Errorf("failed to cleanup user-data template: %w", err)
 	}
 
 	if flatcarConfig.ProvisioningUtility == CloudInit {
@@ -200,12 +209,34 @@ systemd:
             Environment=ALL_PROXY={{ .HTTPProxy }}
 {{- end }}
 
+    - name: setup.service
+      enabled: true
+      contents: |
+        [Install]
+        WantedBy=multi-user.target
+
+        [Unit]
+        Requires=network-online.target
+        Requires=nodeip.service
+        After=network-online.target
+        After=nodeip.service
+
+        Description=Service responsible for configuring the flatcar machine
+
+        [Service]
+        Type=oneshot
+        RemainAfterExit=true
+        EnvironmentFile=-/etc/environment
+        ExecStart=/opt/bin/setup.sh
+
     - name: download-script.service
       enabled: true
       contents: |
         [Unit]
         Requires=network-online.target
+        Requires=setup.service
         After=network-online.target
+        After=setup.service
         [Service]
         Type=oneshot
         EnvironmentFile=-/etc/environment
@@ -239,6 +270,24 @@ systemd:
         [Install]
         WantedBy=multi-user.target
 
+{{- if eq .CloudProviderName "kubevirt" }}
+    - name: restart-kubelet.service
+      enabled: true
+      contents: |
+        [Unit]
+        Requires=kubelet.service
+        After=kubelet.service
+
+        Description=Service responsible for restarting kubelet when the machine is rebooted
+
+        [Service]
+        Type=oneshot
+        ExecStart=/opt/bin/restart-kubelet.sh
+
+        [Install]
+        WantedBy=multi-user.target
+{{- end }}
+
     - name: kubelet.service
       enabled: true
       dropins:
@@ -252,7 +301,7 @@ systemd:
           Requires=download-script.service
           After=download-script.service
       contents: |
-{{ kubeletSystemdUnit .ContainerRuntimeName .KubeletVersion .KubeletCloudProviderName .MachineSpec.Name .DNSIPs .ExternalCloudProvider .PauseImage .MachineSpec.Taints .ExtraKubeletFlags | indent 8 }}
+{{ kubeletSystemdUnit .ContainerRuntimeName .KubeletVersion .KubeletCloudProviderName .MachineSpec.Name .DNSIPs .ExternalCloudProvider .PauseImage .MachineSpec.Taints .ExtraKubeletFlags false | indent 8 }}
 
 storage:
   files:
@@ -349,6 +398,28 @@ storage:
         inline: '{{ .MachineSpec.Name }}'
 {{- end }}
 
+{{- if eq .CloudProviderName "kubevirt" }}
+    - path: /opt/bin/restart-kubelet.sh
+      filesystem: root
+      mode: 0744
+      contents:
+        inline: |
+          #!/bin/bash
+          # Needed for Kubevirt provider because if the virt-launcher pod is deleted,
+          # the VM and DataVolume states are kept and VM is rebooted. We need to restart the kubelet
+          # with the new config (new IP) and run this at every boot.
+          set -xeuo pipefail
+
+          # This helps us avoid an unnecessary restart for kubelet on the first boot
+          if [ -f /etc/kubelet_needs_restart ]; then
+            # restart kubelet since it's not the first boot
+            systemctl daemon-reload
+            systemctl restart kubelet.service
+          else
+            touch /etc/kubelet_needs_restart
+          fi
+{{- end }}
+
     - path: /etc/ssh/sshd_config
       filesystem: root
       mode: 0600
@@ -386,6 +457,26 @@ storage:
           });
 {{- end }}
 
+    - path: /opt/bin/setup.sh
+      filesystem: root
+      mode: 0755
+      contents:
+        inline: |
+          #!/bin/bash
+          set -xeuo pipefail
+
+          # We stop these services here explicitly since masking only removes the symlinks for these services so that they can't be started.
+          # But that wouldn't "stop" the already running services on the first boot.
+
+          {{- if or .FlatcarConfig.DisableUpdateEngine .FlatcarConfig.DisableAutoUpdate }}
+          systemctl stop update-engine.service
+          {{- end }}
+
+          {{- if or .FlatcarConfig.DisableLocksmithD .FlatcarConfig.DisableAutoUpdate }}
+          systemctl stop locksmithd.service
+          {{- end }}
+          systemctl disable setup.service
+
     - path: /opt/bin/download.sh
       filesystem: root
       mode: 0755
@@ -411,6 +502,16 @@ storage:
         inline: |
 {{ .ContainerRuntimeConfig | indent 10 }}
 
+{{- if and (eq .ContainerRuntimeName "docker") .ContainerRuntimeAuthConfig }}
+
+    - path: {{ .ContainerRuntimeAuthConfigFileName }}
+      filesystem: root
+      permissions: 0600
+      content:
+        inline: |
+{{ .ContainerRuntimeAuthConfig | indent 10 }}
+{{- end }}
+
     - path: /etc/crictl.yaml
       filesystem: root
       mode: 0644
@@ -419,7 +520,7 @@ storage:
           runtime-endpoint: unix:///run/containerd/containerd.sock
 `
 
-// Coreos cloud-config template
+// Coreos cloud-config template.
 const userDataCloudInitTemplate = `#cloud-config
 
 users:
@@ -522,7 +623,7 @@ coreos:
         Requires=download-script.service
         After=download-script.service
     content: |
-{{ kubeletSystemdUnit .ContainerRuntimeName .KubeletVersion .KubeletCloudProviderName .MachineSpec.Name .DNSIPs .ExternalCloudProvider .PauseImage .MachineSpec.Taints .ExtraKubeletFlags | indent 6 }}
+{{ kubeletSystemdUnit .ContainerRuntimeName .KubeletVersion .KubeletCloudProviderName .MachineSpec.Name .DNSIPs .ExternalCloudProvider .PauseImage .MachineSpec.Taints .ExtraKubeletFlags false | indent 6 }}
 
   - name: apply-sysctl-settings.service
     enable: true
@@ -536,6 +637,25 @@ coreos:
       ExecStart=/opt/bin/apply_sysctl_settings.sh
       [Install]
       WantedBy=multi-user.target
+
+{{- if eq .CloudProviderName "kubevirt" }}
+  - name: restart-kubelet.service
+      enable: true
+      command: start
+      content: |
+        [Unit]
+        Requires=kubelet.service
+        After=kubelet.service
+
+        Description=Service responsible for restarting kubelet when the machine is rebooted
+
+        [Service]
+        Type=oneshot
+        ExecStart=/opt/bin/restart-kubelet.sh
+
+        [Install]
+        WantedBy=multi-user.target
+{{- end }}
 
 write_files:
 {{- if .HTTPProxy }}
@@ -657,9 +777,37 @@ write_files:
   content: |
 {{ .ContainerRuntimeConfig | indent 4 }}
 
+{{- if and (eq .ContainerRuntimeName "docker") .ContainerRuntimeAuthConfig }}
+
+- path: {{ .ContainerRuntimeAuthConfigFileName }}
+  permissions: "0600"
+  content: |
+{{ .ContainerRuntimeAuthConfig | indent 4 }}
+{{- end }}
+
 - path: /etc/crictl.yaml
   permissions: "0644"
   user: root
   content: |
     runtime-endpoint: unix:///run/containerd/containerd.sock
+
+{{- if eq .CloudProviderName "kubevirt" }}
+- path: "/opt/bin/restart-kubelet.sh"
+  permissions: "0744"
+  content: |
+    #!/bin/bash
+    # Needed for Kubevirt provider because if the virt-launcher pod is deleted,
+    # the VM and DataVolume states are kept and VM is rebooted. We need to restart the kubelet
+    # with the new config (new IP) and run this at every boot.
+    set -xeuo pipefail
+
+    # This helps us avoid an unnecessary restart for kubelet on the first boot
+    if [ -f /etc/kubelet_needs_restart ]; then
+      # restart kubelet since it's not the first boot
+      systemctl daemon-reload
+      systemctl restart kubelet.service
+    else
+      touch /etc/kubelet_needs_restart
+    fi
+{{- end }}
 `

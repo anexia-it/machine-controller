@@ -17,6 +17,7 @@ limitations under the License.
 package nutanix
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strconv"
@@ -195,35 +196,35 @@ func (p *provider) AddDefaults(spec clusterv1alpha1.MachineSpec) (clusterv1alpha
 	return spec, nil
 }
 
-func (p *provider) Validate(spec clusterv1alpha1.MachineSpec) error {
+func (p *provider) Validate(ctx context.Context, spec clusterv1alpha1.MachineSpec) error {
 	config, _, _, err := p.getConfig(spec.ProviderSpec)
 	if err != nil {
-		return fmt.Errorf("failed to parse machineSpec: %v", err)
+		return fmt.Errorf("failed to parse machineSpec: %w", err)
 	}
 
 	client, err := GetClientSet(config)
 	if err != nil {
-		return fmt.Errorf("failed to construct client: %v", err)
+		return fmt.Errorf("failed to construct client: %w", err)
 	}
 
-	cluster, err := getClusterByName(client, config.ClusterName)
+	cluster, err := getClusterByName(ctx, client, config.ClusterName)
 	if err != nil {
-		return fmt.Errorf("failed to get cluster: %v", err)
+		return fmt.Errorf("failed to get cluster: %w", err)
 	}
 
 	if config.ProjectName != "" {
-		if _, err := getProjectByName(client, config.ProjectName); err != nil {
-			return fmt.Errorf("failed to get project: %v", err)
+		if _, err := getProjectByName(ctx, client, config.ProjectName); err != nil {
+			return fmt.Errorf("failed to get project: %w", err)
 		}
 	}
 
-	if _, err := getSubnetByName(client, config.SubnetName, *cluster.Metadata.UUID); err != nil {
-		return fmt.Errorf("failed to get subnet: %v", err)
+	if _, err := getSubnetByName(ctx, client, config.SubnetName, *cluster.Metadata.UUID); err != nil {
+		return fmt.Errorf("failed to get subnet: %w", err)
 	}
 
-	image, err := getImageByName(client, config.ImageName)
+	image, err := getImageByName(ctx, client, config.ImageName)
 	if err != nil {
-		return fmt.Errorf("failed to get image: %v", err)
+		return fmt.Errorf("failed to get image: %w", err)
 	}
 
 	var imageSizeBytes int64
@@ -241,19 +242,19 @@ func (p *provider) Validate(spec clusterv1alpha1.MachineSpec) error {
 	return nil
 }
 
-func (p *provider) Create(machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData, userdata string) (instance.Instance, error) {
-	vm, err := p.create(machine, userdata)
+func (p *provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData, userdata string) (instance.Instance, error) {
+	vm, err := p.create(ctx, machine, userdata)
 	if err != nil {
-		_, cleanupErr := p.Cleanup(machine, data)
+		_, cleanupErr := p.Cleanup(ctx, machine, data)
 		if cleanupErr != nil {
-			return nil, fmt.Errorf("cleaning up failed with err %v after creation failed with err %v", cleanupErr, err)
+			return nil, fmt.Errorf("cleaning up failed with err %v after creation failed with err %w", cleanupErr, err)
 		}
 		return nil, err
 	}
 	return vm, nil
 }
 
-func (p *provider) create(machine *clusterv1alpha1.Machine, userdata string) (instance.Instance, error) {
+func (p *provider) create(ctx context.Context, machine *clusterv1alpha1.Machine, userdata string) (instance.Instance, error) {
 	config, pc, _, err := p.getConfig(machine.Spec.ProviderSpec)
 	if err != nil {
 		return nil, cloudprovidererrors.TerminalError{
@@ -270,14 +271,14 @@ func (p *provider) create(machine *clusterv1alpha1.Machine, userdata string) (in
 		}
 	}
 
-	return createVM(client, machine.Name, *config, pc.OperatingSystem, userdata)
+	return createVM(ctx, client, machine.Name, *config, pc.OperatingSystem, userdata)
 }
 
-func (p *provider) Cleanup(machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData) (bool, error) {
-	return p.cleanup(machine, data)
+func (p *provider) Cleanup(ctx context.Context, machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData) (bool, error) {
+	return p.cleanup(ctx, machine, data)
 }
 
-func (p *provider) cleanup(machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData) (bool, error) {
+func (p *provider) cleanup(ctx context.Context, machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData) (bool, error) {
 	config, _, _, err := p.getConfig(machine.Spec.ProviderSpec)
 	if err != nil {
 		return false, cloudprovidererrors.TerminalError{
@@ -297,7 +298,7 @@ func (p *provider) cleanup(machine *clusterv1alpha1.Machine, data *cloudprovider
 	var projectID *string
 
 	if config.ProjectName != "" {
-		project, err := getProjectByName(client, config.ProjectName)
+		project, err := getProjectByName(ctx, client, config.ProjectName)
 		if err != nil {
 			return false, err
 		}
@@ -305,9 +306,9 @@ func (p *provider) cleanup(machine *clusterv1alpha1.Machine, data *cloudprovider
 		projectID = project.Metadata.UUID
 	}
 
-	vm, err := getVMByName(client, machine.Name, projectID)
+	vm, err := getVMByName(ctx, client, machine.Name, projectID)
 	if err != nil {
-		if err == cloudprovidererrors.ErrInstanceNotFound {
+		if errors.Is(err, cloudprovidererrors.ErrInstanceNotFound) {
 			// VM is gone already
 			return true, nil
 		}
@@ -321,7 +322,7 @@ func (p *provider) cleanup(machine *clusterv1alpha1.Machine, data *cloudprovider
 
 	// TODO: figure out if VM is already in deleting state
 
-	resp, err := client.Prism.V3.DeleteVM(*vm.Metadata.UUID)
+	resp, err := client.Prism.V3.DeleteVM(ctx, *vm.Metadata.UUID)
 	if err != nil {
 		return false, err
 	}
@@ -331,14 +332,14 @@ func (p *provider) cleanup(machine *clusterv1alpha1.Machine, data *cloudprovider
 		return false, errors.New("failed to parse deletion task UUID")
 	}
 
-	if err := waitForCompletion(client, taskID, time.Second*5, time.Minute*10); err != nil {
-		return false, fmt.Errorf("failed to wait for completion: %v", err)
+	if err := waitForCompletion(ctx, client, taskID, time.Second*5, time.Minute*10); err != nil {
+		return false, fmt.Errorf("failed to wait for completion: %w", err)
 	}
 
 	return true, nil
 }
 
-func (p *provider) Get(machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData) (instance.Instance, error) {
+func (p *provider) Get(ctx context.Context, machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData) (instance.Instance, error) {
 	config, _, _, err := p.getConfig(machine.Spec.ProviderSpec)
 	if err != nil {
 		return nil, cloudprovidererrors.TerminalError{
@@ -358,7 +359,7 @@ func (p *provider) Get(machine *clusterv1alpha1.Machine, data *cloudprovidertype
 	var projectID *string
 
 	if config.ProjectName != "" {
-		project, err := getProjectByName(client, config.ProjectName)
+		project, err := getProjectByName(ctx, client, config.ProjectName)
 		if err != nil {
 			return nil, err
 		}
@@ -366,7 +367,7 @@ func (p *provider) Get(machine *clusterv1alpha1.Machine, data *cloudprovidertype
 		projectID = project.Metadata.UUID
 	}
 
-	vm, err := getVMByName(client, machine.Name, projectID)
+	vm, err := getVMByName(ctx, client, machine.Name, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -403,11 +404,11 @@ func (p *provider) Get(machine *clusterv1alpha1.Machine, data *cloudprovidertype
 	}, nil
 }
 
-func (p *provider) MigrateUID(machine *clusterv1alpha1.Machine, new ktypes.UID) error {
+func (p *provider) MigrateUID(_ context.Context, _ *clusterv1alpha1.Machine, _ ktypes.UID) error {
 	return nil
 }
 
-// GetCloudConfig returns an empty cloud configuration for Nutanix as no CCM exists
+// GetCloudConfig returns an empty cloud configuration for Nutanix as no CCM exists.
 func (p *provider) GetCloudConfig(spec clusterv1alpha1.MachineSpec) (config string, name string, err error) {
 	return "", "", nil
 }
@@ -417,7 +418,7 @@ func (p *provider) MachineMetricsLabels(machine *clusterv1alpha1.Machine) (map[s
 
 	config, _, _, err := p.getConfig(machine.Spec.ProviderSpec)
 	if err != nil {
-		return labels, fmt.Errorf("failed to parse config: %v", err)
+		return labels, fmt.Errorf("failed to parse config: %w", err)
 	}
 
 	labels["size"] = fmt.Sprintf("%d-cpus-%d-mb", config.CPUs, config.MemoryMB)

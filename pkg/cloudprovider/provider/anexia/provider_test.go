@@ -17,22 +17,25 @@ limitations under the License.
 package anexia
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"testing"
 	"time"
 
-	anxclient "github.com/anexia-it/go-anxcloud/pkg/client"
-	"github.com/anexia-it/go-anxcloud/pkg/ipam/address"
-	"github.com/anexia-it/go-anxcloud/pkg/vsphere/provisioning/progress"
-	"github.com/anexia-it/go-anxcloud/pkg/vsphere/provisioning/vm"
 	"github.com/gophercloud/gophercloud/testhelper"
+	anxclient "go.anx.io/go-anxcloud/pkg/client"
+	"go.anx.io/go-anxcloud/pkg/ipam/address"
+	"go.anx.io/go-anxcloud/pkg/vsphere/provisioning/progress"
+	"go.anx.io/go-anxcloud/pkg/vsphere/provisioning/vm"
+
 	"github.com/kubermatic/machine-controller/pkg/apis/cluster/v1alpha1"
 	clusterv1alpha1 "github.com/kubermatic/machine-controller/pkg/apis/cluster/v1alpha1"
 	anxtypes "github.com/kubermatic/machine-controller/pkg/cloudprovider/provider/anexia/types"
 	"github.com/kubermatic/machine-controller/pkg/cloudprovider/provider/anexia/utils"
 	cloudprovidertypes "github.com/kubermatic/machine-controller/pkg/cloudprovider/types"
+
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -55,7 +58,7 @@ func TestAnexiaProvider(t *testing.T) {
 		testhelper.Mux.HandleFunc("/api/vsphere/v1/search/by_name.json", createSearchHandler(t, waitUntilVMIsFound))
 
 		providerStatus := anxtypes.ProviderStatus{}
-		ctx := utils.CreateReconcileContext(utils.ReconcileContext{
+		ctx := utils.CreateReconcileContext(context.Background(), utils.ReconcileContext{
 			Machine: &v1alpha1.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: "TestMachine"},
 			},
@@ -73,7 +76,6 @@ func TestAnexiaProvider(t *testing.T) {
 		err := waitForVM(ctx, client)
 		if err != nil {
 			t.Fatal("No error was expected", err)
-
 		}
 
 		if providerStatus.InstanceID != TestIdentifier {
@@ -148,7 +150,7 @@ func TestAnexiaProvider(t *testing.T) {
 		})
 
 		providerStatus := anxtypes.ProviderStatus{}
-		ctx := utils.CreateReconcileContext(utils.ReconcileContext{
+		ctx := utils.CreateReconcileContext(context.Background(), utils.ReconcileContext{
 			Machine: &v1alpha1.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: "TestMachine"},
 			},
@@ -184,7 +186,7 @@ func TestAnexiaProvider(t *testing.T) {
 				},
 			},
 		}
-		ctx := utils.CreateReconcileContext(utils.ReconcileContext{
+		ctx := utils.CreateReconcileContext(context.Background(), utils.ReconcileContext{
 			Status:       &providerStatus,
 			UserData:     "",
 			Config:       nil,
@@ -212,7 +214,7 @@ func TestAnexiaProvider(t *testing.T) {
 			ReservedIP: "",
 			IPState:    "",
 		}
-		ctx := utils.CreateReconcileContext(utils.ReconcileContext{Status: providerStatus})
+		ctx := utils.CreateReconcileContext(context.Background(), utils.ReconcileContext{Status: providerStatus})
 
 		t.Run("with unbound reserved IP", func(t *testing.T) {
 			expectedIP := "8.8.8.8"
@@ -269,7 +271,7 @@ func TestValidate(t *testing.T) {
 
 	provider := New(nil)
 	for _, testCase := range getSpecsForValidationTest(t, configCases) {
-		err := provider.Validate(testCase.Spec)
+		err := provider.Validate(context.Background(), testCase.Spec)
 		if testCase.ExpectedError != nil {
 			testhelper.AssertEquals(t, testCase.ExpectedError.Error(), err.Error())
 		} else {
@@ -306,7 +308,6 @@ func TestGetProviderStatus(t *testing.T) {
 	returnedStatus := getProviderStatus(machine)
 
 	testhelper.AssertEquals(t, "InstanceID", returnedStatus.InstanceID)
-
 }
 
 func TestUpdateStatus(t *testing.T) {

@@ -38,38 +38,37 @@ type Provider struct{}
 
 // UserData renders user-data template to string.
 func (p Provider) UserData(req plugin.UserDataRequest) (string, error) {
-
 	tmpl, err := template.New("user-data").Funcs(userdatahelper.TxtFuncMap()).Parse(userDataTemplate)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse user-data template: %v", err)
+		return "", fmt.Errorf("failed to parse user-data template: %w", err)
 	}
 
 	kubeletVersion, err := semver.NewVersion(req.MachineSpec.Versions.Kubelet)
 	if err != nil {
-		return "", fmt.Errorf("invalid kubelet version: %v", err)
+		return "", fmt.Errorf("invalid kubelet version: %w", err)
 	}
 
 	pconfig, err := providerconfigtypes.GetConfig(req.MachineSpec.ProviderSpec)
 	if err != nil {
-		return "", fmt.Errorf("failed to get providerSpec: %v", err)
+		return "", fmt.Errorf("failed to get providerSpec: %w", err)
 	}
 
 	if pconfig.OverwriteCloudConfig != nil {
 		req.CloudConfig = *pconfig.OverwriteCloudConfig
 	}
 
-	if pconfig.Network != nil {
+	if pconfig.Network.IsStaticIPConfig() {
 		return "", errors.New("static IP config is not supported with SLES")
 	}
 
 	slesConfig, err := LoadConfig(pconfig.OperatingSystemSpec)
 	if err != nil {
-		return "", fmt.Errorf("failed to get sles config from provider config: %v", err)
+		return "", fmt.Errorf("failed to get sles config from provider config: %w", err)
 	}
 
 	serverAddr, err := userdatahelper.GetServerAddressFromKubeconfig(req.Kubeconfig)
 	if err != nil {
-		return "", fmt.Errorf("error extracting server address from kubeconfig: %v", err)
+		return "", fmt.Errorf("error extracting server address from kubeconfig: %w", err)
 	}
 
 	kubeconfigString, err := userdatahelper.StringifyKubeconfig(req.Kubeconfig)
@@ -79,7 +78,7 @@ func (p Provider) UserData(req plugin.UserDataRequest) (string, error) {
 
 	kubernetesCACert, err := userdatahelper.GetCACert(req.Kubeconfig)
 	if err != nil {
-		return "", fmt.Errorf("error extracting cacert: %v", err)
+		return "", fmt.Errorf("error extracting cacert: %w", err)
 	}
 
 	crEngine := req.ContainerRuntime.Engine(kubeletVersion)
@@ -88,37 +87,46 @@ func (p Provider) UserData(req plugin.UserDataRequest) (string, error) {
 		return "", fmt.Errorf("failed to generate container runtime config: %w", err)
 	}
 
+	crAuthConfig, err := crEngine.AuthConfig()
+	if err != nil {
+		return "", fmt.Errorf("failed to generate container runtime auth config: %w", err)
+	}
+
 	data := struct {
 		plugin.UserDataRequest
-		ProviderSpec                   *providerconfigtypes.Config
-		OSConfig                       *Config
-		ServerAddr                     string
-		KubeletVersion                 string
-		Kubeconfig                     string
-		KubernetesCACert               string
-		NodeIPScript                   string
-		ExtraKubeletFlags              []string
-		ContainerRuntimeConfigFileName string
-		ContainerRuntimeConfig         string
-		ContainerRuntimeName           string
+		ProviderSpec                       *providerconfigtypes.Config
+		OSConfig                           *Config
+		ServerAddr                         string
+		KubeletVersion                     string
+		Kubeconfig                         string
+		KubernetesCACert                   string
+		NodeIPScript                       string
+		ExtraKubeletFlags                  []string
+		ContainerRuntimeConfigFileName     string
+		ContainerRuntimeConfig             string
+		ContainerRuntimeAuthConfigFileName string
+		ContainerRuntimeAuthConfig         string
+		ContainerRuntimeName               string
 	}{
-		UserDataRequest:                req,
-		ProviderSpec:                   pconfig,
-		OSConfig:                       slesConfig,
-		ServerAddr:                     serverAddr,
-		KubeletVersion:                 kubeletVersion.String(),
-		Kubeconfig:                     kubeconfigString,
-		KubernetesCACert:               kubernetesCACert,
-		NodeIPScript:                   userdatahelper.SetupNodeIPEnvScript(),
-		ExtraKubeletFlags:              crEngine.KubeletFlags(),
-		ContainerRuntimeConfigFileName: crEngine.ConfigFileName(),
-		ContainerRuntimeConfig:         crConfig,
-		ContainerRuntimeName:           crEngine.String(),
+		UserDataRequest:                    req,
+		ProviderSpec:                       pconfig,
+		OSConfig:                           slesConfig,
+		ServerAddr:                         serverAddr,
+		KubeletVersion:                     kubeletVersion.String(),
+		Kubeconfig:                         kubeconfigString,
+		KubernetesCACert:                   kubernetesCACert,
+		NodeIPScript:                       userdatahelper.SetupNodeIPEnvScript(),
+		ExtraKubeletFlags:                  crEngine.KubeletFlags(),
+		ContainerRuntimeConfigFileName:     crEngine.ConfigFileName(),
+		ContainerRuntimeConfig:             crConfig,
+		ContainerRuntimeAuthConfigFileName: crEngine.AuthConfigFileName(),
+		ContainerRuntimeAuthConfig:         crAuthConfig,
+		ContainerRuntimeName:               crEngine.String(),
 	}
 	b := &bytes.Buffer{}
 	err = tmpl.Execute(b, data)
 	if err != nil {
-		return "", fmt.Errorf("failed to execute user-data template: %v", err)
+		return "", fmt.Errorf("failed to execute user-data template: %w", err)
 	}
 	return userdatahelper.CleanupTemplateOutput(b.String())
 }
@@ -174,18 +182,12 @@ write_files:
     systemctl restart systemd-modules-load.service
     sysctl --system
 
-{{- /* Make sure we always disable swap - Otherwise the kubelet won't start'. */}}
-    cp /etc/fstab /etc/fstab.orig
-    cat /etc/fstab.orig | awk '$3 ~ /^swap$/ && $1 !~ /^#/ {$0="# commented out by cloudinit\n#"$0} 1' > /etc/fstab.noswap
-    mv /etc/fstab.noswap /etc/fstab
-    swapoff -a
-
     zypper --non-interactive --quiet --color install ebtables \
       ceph-common \
       e2fsprogs \
       jq \
       socat \
-      {{- if eq .CloudProviderName "vsphere" }}
+      {{- if or (eq .CloudProviderName "vsphere") (eq .CloudProviderName "vmware-cloud-director") }}
       open-vm-tools \
       {{- end }}
       ipvsadm
@@ -209,9 +211,19 @@ write_files:
       sleep 1
     done
 
+- path: "/opt/disable-swap.sh"
+  permissions: "0755"
+  content: |
+    # Make sure we always disable swap - Otherwise the kubelet won't start as for some cloud
+    # providers swap gets enabled on reboot or after the setup script has finished executing.
+    cp /etc/fstab /etc/fstab.orig
+    cat /etc/fstab.orig | awk '$3 ~ /^swap$/ && $1 !~ /^#/ {$0="# commented out by cloudinit\n#"$0} 1' > /etc/fstab.noswap
+    mv /etc/fstab.noswap /etc/fstab
+    swapoff -a
+
 - path: "/etc/systemd/system/kubelet.service"
   content: |
-{{ kubeletSystemdUnit .ContainerRuntimeName .KubeletVersion .KubeletCloudProviderName .MachineSpec.Name .DNSIPs .ExternalCloudProvider .PauseImage .MachineSpec.Taints .ExtraKubeletFlags | indent 4 }}
+{{ kubeletSystemdUnit .ContainerRuntimeName .KubeletVersion .KubeletCloudProviderName .MachineSpec.Name .DNSIPs .ExternalCloudProvider .PauseImage .MachineSpec.Taints .ExtraKubeletFlags true | indent 4 }}
 
 - path: "/etc/systemd/system/kubelet.service.d/extras.conf"
   content: |
@@ -266,6 +278,14 @@ write_files:
   permissions: "0644"
   content: |
 {{ .ContainerRuntimeConfig | indent 4 }}
+
+{{- if and (eq .ContainerRuntimeName "docker") .ContainerRuntimeAuthConfig }}
+
+- path: {{ .ContainerRuntimeAuthConfigFileName }}
+  permissions: "0600"
+  content: |
+{{ .ContainerRuntimeAuthConfig | indent 4 }}
+{{- end }}
 
 - path: /etc/systemd/system/kubelet-healthcheck.service
   permissions: "0644"

@@ -43,7 +43,6 @@ const (
 	kubeletFlagsTpl = `--bootstrap-kubeconfig=/etc/kubernetes/bootstrap-kubelet.conf \
 --kubeconfig=/var/lib/kubelet/kubeconfig \
 --config=/etc/kubernetes/kubelet.conf \
---network-plugin=cni \
 --cert-dir=/etc/kubernetes/pki \
 {{- if or (.CloudProvider) (.IsExternal) }}
 {{ cloudProviderFlags .CloudProvider .IsExternal }} \
@@ -74,6 +73,7 @@ Description=kubelet: The Kubernetes Node Agent
 Documentation=https://kubernetes.io/docs/home/
 
 [Service]
+User=root
 Restart=always
 StartLimitInterval=0
 RestartSec=10
@@ -84,6 +84,9 @@ Environment="PATH=/opt/bin:/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bi
 EnvironmentFile=-/etc/environment
 
 ExecStartPre=/bin/bash /opt/load-kernel-modules.sh
+{{ if .DisableSwap }}
+ExecStartPre=/bin/bash /opt/disable-swap.sh
+{{ end }}
 ExecStartPre=/bin/bash /opt/bin/setup_net_env.sh
 ExecStart=/opt/bin/kubelet $KUBELET_EXTRA_ARGS \
 {{ kubeletFlags .KubeletVersion .CloudProvider .Hostname .ClusterDNSIPs .IsExternal .PauseImage .InitialTaints .ExtraKubeletFlags | indent 2 }}
@@ -105,7 +108,7 @@ WantedBy=multi-user.target`
 const cpFlags = `--cloud-provider=%s \
 --cloud-config=/etc/kubernetes/cloud-config`
 
-// List of allowed TLS cipher suites for kubelet
+// List of allowed TLS cipher suites for kubelet.
 var kubeletTLSCipherSuites = []string{
 	// TLS 1.3 cipher suites
 	"TLS_AES_128_GCM_SHA256",
@@ -120,7 +123,7 @@ var kubeletTLSCipherSuites = []string{
 	"TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305",
 }
 
-// CloudProviderFlags returns --cloud-provider and --cloud-config flags
+// CloudProviderFlags returns --cloud-provider and --cloud-config flags.
 func CloudProviderFlags(cpName string, external bool) (string, error) {
 	if cpName == "" && !external {
 		return "", nil
@@ -132,11 +135,11 @@ func CloudProviderFlags(cpName string, external bool) (string, error) {
 	return fmt.Sprintf(cpFlags, cpName), nil
 }
 
-// KubeletSystemdUnit returns the systemd unit for the kubelet
-func KubeletSystemdUnit(containerRuntime, kubeletVersion, cloudProvider, hostname string, dnsIPs []net.IP, external bool, pauseImage string, initialTaints []corev1.Taint, extraKubeletFlags []string) (string, error) {
+// KubeletSystemdUnit returns the systemd unit for the kubelet.
+func KubeletSystemdUnit(containerRuntime, kubeletVersion, cloudProvider, hostname string, dnsIPs []net.IP, external bool, pauseImage string, initialTaints []corev1.Taint, extraKubeletFlags []string, disableSwap bool) (string, error) {
 	tmpl, err := template.New("kubelet-systemd-unit").Funcs(TxtFuncMap()).Parse(kubeletSystemdUnitTpl)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse kubelet-systemd-unit template: %v", err)
+		return "", fmt.Errorf("failed to parse kubelet-systemd-unit template: %w", err)
 	}
 
 	data := struct {
@@ -149,6 +152,7 @@ func KubeletSystemdUnit(containerRuntime, kubeletVersion, cloudProvider, hostnam
 		PauseImage        string
 		InitialTaints     []corev1.Taint
 		ExtraKubeletFlags []string
+		DisableSwap       bool
 	}{
 		ContainerRuntime:  containerRuntime,
 		KubeletVersion:    kubeletVersion,
@@ -159,6 +163,7 @@ func KubeletSystemdUnit(containerRuntime, kubeletVersion, cloudProvider, hostnam
 		PauseImage:        pauseImage,
 		InitialTaints:     initialTaints,
 		ExtraKubeletFlags: extraKubeletFlags,
+		DisableSwap:       disableSwap,
 	}
 
 	var buf strings.Builder
@@ -169,7 +174,7 @@ func KubeletSystemdUnit(containerRuntime, kubeletVersion, cloudProvider, hostnam
 	return buf.String(), nil
 }
 
-// kubeletConfiguration returns marshaled kubelet.config.k8s.io/v1beta1 KubeletConfiguration
+// kubeletConfiguration returns marshaled kubelet.config.k8s.io/v1beta1 KubeletConfiguration.
 func kubeletConfiguration(clusterDomain string, clusterDNS []net.IP, featureGates map[string]bool, kubeletConfigs map[string]string, containerRuntime string) (string, error) {
 	clusterDNSstr := make([]string, 0, len(clusterDNS))
 	for _, ip := range clusterDNS {
@@ -242,6 +247,16 @@ func kubeletConfiguration(clusterDomain string, clusterDNS []net.IP, featureGate
 		}
 	}
 
+	if maxPods, ok := kubeletConfigs[common.MaxPodsKubeletConfig]; ok {
+		mp, err := strconv.ParseInt(maxPods, 10, 32)
+		if err != nil {
+			// Instead of breaking the workflow, just print a warning and skip the configuration
+			klog.Warningf("Skipping invalid MaxPods value %v for Kubelet configuration", maxPods)
+		} else {
+			cfg.MaxPods = int32(mp)
+		}
+	}
+
 	if containerLogMaxSize, ok := kubeletConfigs[common.ContainerLogMaxSizeKubeletConfig]; ok {
 		cfg.ContainerLogMaxSize = containerLogMaxSize
 	}
@@ -263,11 +278,11 @@ func kubeletConfiguration(clusterDomain string, clusterDNS []net.IP, featureGate
 	return string(buf), err
 }
 
-// KubeletFlags returns the kubelet flags
+// KubeletFlags returns the kubelet flags.
 func KubeletFlags(version, cloudProvider, hostname string, dnsIPs []net.IP, external bool, pauseImage string, initialTaints []corev1.Taint, extraKubeletFlags []string) (string, error) {
 	tmpl, err := template.New("kubelet-flags").Funcs(TxtFuncMap()).Parse(kubeletFlagsTpl)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse kubelet-flags template: %v", err)
+		return "", fmt.Errorf("failed to parse kubelet-flags template: %w", err)
 	}
 
 	initialTaintsArgs := []string{}
@@ -294,6 +309,19 @@ func KubeletFlags(version, cloudProvider, hostname string, dnsIPs []net.IP, exte
 		)
 	}
 
+	// --network-plugin was removed in 1.24 and can only be set for 1.23 or lower
+
+	con, err = semver.NewConstraint("< 1.24")
+	if err != nil {
+		return "", err
+	}
+
+	if con.Check(ver) {
+		kubeletFlags = append(kubeletFlags,
+			"--network-plugin=cni",
+		)
+	}
+
 	data := struct {
 		CloudProvider     string
 		Hostname          string
@@ -316,13 +344,13 @@ func KubeletFlags(version, cloudProvider, hostname string, dnsIPs []net.IP, exte
 
 	var buf strings.Builder
 	if err = tmpl.Execute(&buf, data); err != nil {
-		return "", fmt.Errorf("failed to execute kubelet-flags template: %v", err)
+		return "", fmt.Errorf("failed to execute kubelet-flags template: %w", err)
 	}
 
 	return buf.String(), nil
 }
 
-// KubeletHealthCheckSystemdUnit kubelet health checking systemd unit
+// KubeletHealthCheckSystemdUnit kubelet health checking systemd unit.
 func KubeletHealthCheckSystemdUnit() string {
 	return `[Unit]
 Requires=kubelet.service
@@ -336,11 +364,11 @@ WantedBy=multi-user.target
 `
 }
 
-// ContainerRuntimeHealthCheckSystemdUnit container-runtime health checking systemd unit
+// ContainerRuntimeHealthCheckSystemdUnit container-runtime health checking systemd unit.
 func ContainerRuntimeHealthCheckSystemdUnit(containerRuntime string) (string, error) {
 	tmpl, err := template.New("container-runtime-healthcheck-systemd-unit").Funcs(TxtFuncMap()).Parse(containerRuntimeHealthCheckSystemdUnitTpl)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse container-runtime-healthcheck-systemd-unit template: %v", err)
+		return "", fmt.Errorf("failed to parse container-runtime-healthcheck-systemd-unit template: %w", err)
 	}
 
 	data := struct {

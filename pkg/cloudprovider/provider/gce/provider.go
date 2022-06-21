@@ -21,21 +21,24 @@ limitations under the License.
 package gce
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
 
 	"cloud.google.com/go/logging"
-	monitoring "cloud.google.com/go/monitoring/apiv3"
-	"google.golang.org/api/compute/v1"
+	monitoring "cloud.google.com/go/monitoring/apiv3/v2"
+	compute "google.golang.org/api/compute/v1"
 	"google.golang.org/api/googleapi"
 
 	"github.com/kubermatic/machine-controller/pkg/apis/cluster/common"
 	clusterv1alpha1 "github.com/kubermatic/machine-controller/pkg/apis/cluster/v1alpha1"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/errors"
+	cloudprovidererrors "github.com/kubermatic/machine-controller/pkg/cloudprovider/errors"
 	"github.com/kubermatic/machine-controller/pkg/cloudprovider/instance"
 	gcetypes "github.com/kubermatic/machine-controller/pkg/cloudprovider/provider/gce/types"
 	cloudprovidertypes "github.com/kubermatic/machine-controller/pkg/cloudprovider/types"
+	"github.com/kubermatic/machine-controller/pkg/cloudprovider/util"
 	"github.com/kubermatic/machine-controller/pkg/providerconfig"
 
 	"k8s.io/apimachinery/pkg/types"
@@ -80,7 +83,7 @@ func New(configVarResolver *providerconfig.ConfigVarResolver) *Provider {
 	}
 }
 
-// AddDefaults reads the MachineSpec and applies defaults for provider specific fields
+// AddDefaults reads the MachineSpec and applies defaults for provider specific fields.
 func (p *Provider) AddDefaults(spec clusterv1alpha1.MachineSpec) (clusterv1alpha1.MachineSpec, error) {
 	// Read cloud provider spec.
 	cpSpec, _, err := newCloudProviderSpec(spec.ProviderSpec)
@@ -99,7 +102,7 @@ func (p *Provider) AddDefaults(spec clusterv1alpha1.MachineSpec) (clusterv1alpha
 }
 
 // Validate checks the given machine's specification.
-func (p *Provider) Validate(spec clusterv1alpha1.MachineSpec) error {
+func (p *Provider) Validate(_ context.Context, spec clusterv1alpha1.MachineSpec) error {
 	// Read configuration.
 	cfg, err := newConfig(p.resolver, spec.ProviderSpec)
 	if err != nil {
@@ -112,6 +115,17 @@ func (p *Provider) Validate(spec clusterv1alpha1.MachineSpec) error {
 	if cfg.zone == "" {
 		return newError(common.InvalidConfigurationMachineError, errInvalidZone)
 	}
+
+	switch cfg.providerConfig.Network.GetIPFamily() {
+	case util.Unspecified, util.IPv4:
+		// noop
+	case util.IPv6:
+		return newError(common.InvalidConfigurationMachineError, util.ErrIPv6OnlyUnsupported)
+	case util.DualStack:
+	default:
+		return newError(common.InvalidConfigurationMachineError, util.ErrUnknownNetworkFamily, cfg.providerConfig.Network.GetIPFamily())
+	}
+
 	if cfg.machineType == "" {
 		return newError(common.InvalidConfigurationMachineError, errInvalidMachineType)
 	}
@@ -129,7 +143,7 @@ func (p *Provider) Validate(spec clusterv1alpha1.MachineSpec) error {
 }
 
 // Get retrieves a node instance that is associated with the given machine.
-func (p *Provider) Get(machine *clusterv1alpha1.Machine, _ *cloudprovidertypes.ProviderData) (instance.Instance, error) {
+func (p *Provider) Get(_ context.Context, machine *clusterv1alpha1.Machine, _ *cloudprovidertypes.ProviderData) (instance.Instance, error) {
 	return p.get(machine)
 }
 
@@ -148,15 +162,16 @@ func (p *Provider) get(machine *clusterv1alpha1.Machine) (*googleInstance, error
 	label := fmt.Sprintf("labels.%s=%s", labelMachineUID, machine.UID)
 	insts, err := svc.Instances.List(cfg.projectID, cfg.zone).Filter(label).Do()
 	if err != nil {
-		if gerr, ok := err.(*googleapi.Error); ok {
+		var gerr *googleapi.Error
+		if errors.As(err, &gerr) {
 			if gerr.Code == http.StatusNotFound {
-				return nil, errors.ErrInstanceNotFound
+				return nil, cloudprovidererrors.ErrInstanceNotFound
 			}
 		}
 		return nil, newError(common.InvalidConfigurationMachineError, errRetrieveInstance, err)
 	}
 	if len(insts.Items) == 0 {
-		return nil, errors.ErrInstanceNotFound
+		return nil, cloudprovidererrors.ErrInstanceNotFound
 	}
 	if len(insts.Items) > 1 {
 		return nil, newError(common.InvalidConfigurationMachineError, errGotTooManyInstances)
@@ -195,7 +210,7 @@ func (p *Provider) GetCloudConfig(spec clusterv1alpha1.MachineSpec) (config stri
 }
 
 // Create inserts a cloud instance according to the given machine.
-func (p *Provider) Create(machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData, userdata string) (instance.Instance, error) {
+func (p *Provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData, userdata string) (instance.Instance, error) {
 	// Read configuration.
 	cfg, err := newConfig(p.resolver, machine.Spec.ProviderSpec)
 	if err != nil {
@@ -253,6 +268,15 @@ func (p *Provider) Create(machine *clusterv1alpha1.Machine, data *cloudprovidert
 			Items: cfg.tags,
 		},
 	}
+
+	if cfg.automaticRestart != nil {
+		inst.Scheduling.AutomaticRestart = cfg.automaticRestart
+	}
+
+	if cfg.provisioningModel != nil {
+		inst.Scheduling.ProvisioningModel = *cfg.provisioningModel
+	}
+
 	op, err := svc.Instances.Insert(cfg.projectID, cfg.zone, inst).Do()
 	if err != nil {
 		return nil, newError(common.InvalidConfigurationMachineError, errInsertInstance, err)
@@ -262,11 +286,11 @@ func (p *Provider) Create(machine *clusterv1alpha1.Machine, data *cloudprovidert
 		return nil, newError(common.InvalidConfigurationMachineError, errInsertInstance, err)
 	}
 	// Retrieve it to get a full qualified instance.
-	return p.Get(machine, data)
+	return p.Get(ctx, machine, data)
 }
 
 // Cleanup deletes the instance associated with the machine and all associated resources.
-func (p *Provider) Cleanup(machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData) (bool, error) {
+func (p *Provider) Cleanup(_ context.Context, machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData) (bool, error) {
 	// Read configuration.
 	cfg, err := newConfig(p.resolver, machine.Spec.ProviderSpec)
 	if err != nil {
@@ -280,7 +304,8 @@ func (p *Provider) Cleanup(machine *clusterv1alpha1.Machine, data *cloudprovider
 	// Delete instance.
 	op, err := svc.Instances.Delete(cfg.projectID, cfg.zone, machine.Spec.Name).Do()
 	if err != nil {
-		if gerr, ok := err.(*googleapi.Error); ok {
+		var gerr *googleapi.Error
+		if errors.As(err, &gerr) {
 			if gerr.Code == http.StatusNotFound {
 				return true, nil
 			}
@@ -316,7 +341,7 @@ func (p *Provider) MachineMetricsLabels(machine *clusterv1alpha1.Machine) (map[s
 
 // MigrateUID updates the UID of an instance after the controller migrates types
 // and the UID of the machine object changed.
-func (p *Provider) MigrateUID(machine *clusterv1alpha1.Machine, newUID types.UID) error {
+func (p *Provider) MigrateUID(_ context.Context, machine *clusterv1alpha1.Machine, newUID types.UID) error {
 	// Read configuration.
 	cfg, err := newConfig(p.resolver, machine.Spec.ProviderSpec)
 	if err != nil {
@@ -330,7 +355,7 @@ func (p *Provider) MigrateUID(machine *clusterv1alpha1.Machine, newUID types.UID
 	// Retrieve instance.
 	inst, err := p.get(machine)
 	if err != nil {
-		if err == errors.ErrInstanceNotFound {
+		if errors.Is(err, cloudprovidererrors.ErrInstanceNotFound) {
 			return nil
 		}
 		return err
@@ -364,7 +389,7 @@ func (p *Provider) SetMetricsForMachines(machines clusterv1alpha1.MachineList) e
 
 // newError creates a terminal error matching to the provider interface.
 func newError(reason common.MachineStatusError, msg string, args ...interface{}) error {
-	return errors.TerminalError{
+	return cloudprovidererrors.TerminalError{
 		Reason:  reason,
 		Message: fmt.Sprintf(msg, args...),
 	}

@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-ARG GO_VERSION=1.17.1
-FROM golang:${GO_VERSION} AS builder
+ARG GO_VERSION=1.18.2
+FROM docker.io/golang:${GO_VERSION} AS builder
 WORKDIR /go/src/github.com/kubermatic/machine-controller
 COPY . .
 RUN make all

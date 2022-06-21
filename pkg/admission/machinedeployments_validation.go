@@ -120,7 +120,7 @@ func machineDeploymentDefaultingFunction(md *v1alpha1.MachineDeployment) {
 func mutationsForMachineDeployment(md *v1alpha1.MachineDeployment, useOSM bool) error {
 	providerConfig, err := providerconfigtypes.GetConfig(md.Spec.Template.Spec.ProviderSpec)
 	if err != nil {
-		return fmt.Errorf("failed to read MachineDeployment.Spec.Template.Spec.ProviderSpec: %v", err)
+		return fmt.Errorf("failed to read MachineDeployment.Spec.Template.Spec.ProviderSpec: %w", err)
 	}
 
 	if useOSM {
@@ -134,22 +134,23 @@ func mutationsForMachineDeployment(md *v1alpha1.MachineDeployment, useOSM bool) 
 	if providerConfig.CloudProvider == cloudProviderPacket {
 		err = migrateToEquinixMetal(providerConfig)
 		if err != nil {
-			return fmt.Errorf("failed to migrate packet to equinix metal: %v", err)
+			return fmt.Errorf("failed to migrate packet to equinix metal: %w", err)
 		}
 	}
 
 	// Update value in original object
 	md.Spec.Template.Spec.ProviderSpec.Value.Raw, err = json.Marshal(providerConfig)
 	if err != nil {
-		return fmt.Errorf("failed to json marshal machine.spec.providerSpec: %v", err)
+		return fmt.Errorf("failed to json marshal machine.spec.providerSpec: %w", err)
 	}
 
 	return nil
 }
 
 func ensureOSPAnnotation(md *v1alpha1.MachineDeployment, providerConfig providerconfigtypes.Config) error {
-	// Check for existing annotation
-	if _, ok := md.Annotations[osmresources.MachineDeploymentOSPAnnotation]; !ok {
+	// Check for existing annotation if it doesn't exist or if the value is empty
+	// inject the appropriate annotation.
+	if val, ok := md.Annotations[osmresources.MachineDeploymentOSPAnnotation]; !ok || val == "" {
 		if md.Annotations == nil {
 			md.Annotations = make(map[string]string)
 		}

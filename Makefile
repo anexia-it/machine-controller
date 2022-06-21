@@ -14,19 +14,17 @@
 
 SHELL = /bin/bash -eu -o pipefail
 
-GO_VERSION ?= 1.17.1
+GO_VERSION ?= 1.18.2
 
 GOOS ?= $(shell go env GOOS)
 
 export CGO_ENABLED := 0
 
-export E2E_SSH_PUBKEY ?= $(shell test -f ~/.ssh/id_rsa.pub && cat ~/.ssh/id_rsa.pub)
-
 export GIT_TAG ?= $(shell git tag --points-at HEAD)
 
 export GOFLAGS?=-mod=readonly -trimpath
 
-REGISTRY ?= docker.io
+REGISTRY ?= quay.io
 REGISTRY_NAMESPACE ?= kubermatic
 
 LDFLAGS ?= -ldflags '-s -w'
@@ -35,7 +33,7 @@ IMAGE_TAG = \
 		$(shell echo $$(git rev-parse HEAD && if [[ -n $$(git status --porcelain) ]]; then echo '-dirty'; fi)|tr -d ' ')
 IMAGE_NAME ?= $(REGISTRY)/$(REGISTRY_NAMESPACE)/machine-controller:$(IMAGE_TAG)
 
-OS = amzn2 centos ubuntu sles rhel flatcar
+OS = amzn2 centos ubuntu sles rhel flatcar rockylinux
 USERDATA_BIN = $(patsubst %, machine-controller-userdata-%, $(OS))
 
 BASE64_ENC = \
@@ -98,23 +96,12 @@ test-unit-docker:
 .PHONY: test-unit
 test-unit:
 	@#The `-race` flag requires CGO
-	CGO_ENABLED=1 go test -race ./...
+	CGO_ENABLED=1 go test -v -race ./...
 
 .PHONY: build-tests
 build-tests:
 	go test -run nope ./...
 	go test -tags e2e -run nope ./...
-
-.PHONY: e2e-cluster
-e2e-cluster: machine-controller webhook
-	make -C test/tools/integration apply
-	./test/tools/integration/provision_master.sh do-not-deploy-machine-controller
-	KUBECONFIG=$(shell pwd)/.kubeconfig kubectl apply -f examples/machine-controller.yaml -l local-testing="true"
-
-.PHONY: e2e-destroy
-e2e-destroy:
-	./test/tools/integration/cleanup_machines.sh
-	make -C test/tools/integration destroy
 
 examples/ca-key.pem:
 	openssl genrsa -out examples/ca-key.pem 4096
@@ -161,7 +148,7 @@ check-dependencies:
 
 .PHONY: download-gocache
 download-gocache:
-	@./hack/ci-download-gocache.sh
+	@./hack/ci/download-gocache.sh
 
 .PHONY: shfmt
 shfmt:

@@ -21,13 +21,17 @@ limitations under the License.
 package gce
 
 import (
+	"context"
 	"fmt"
 	"time"
 
-	"golang.org/x/oauth2"
 	"google.golang.org/api/compute/v1"
+	"google.golang.org/api/option"
+
+	"github.com/kubermatic/machine-controller/pkg/cloudprovider/util"
 
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/klog"
 )
 
 const (
@@ -52,9 +56,10 @@ type service struct {
 
 // connectComputeService establishes a service connection to the Compute Engine.
 func connectComputeService(cfg *config) (*service, error) {
-	svc, err := compute.New(cfg.jwtConfig.Client(oauth2.NoContext))
+	client := cfg.jwtConfig.Client(context.Background())
+	svc, err := compute.NewService(context.Background(), option.WithHTTPClient(client))
 	if err != nil {
-		return nil, fmt.Errorf("cannot connect to Google Cloud: %v", err)
+		return nil, fmt.Errorf("cannot connect to Google Cloud: %w", err)
 	}
 	return &service{svc}, nil
 }
@@ -72,13 +77,36 @@ func (svc *service) networkInterfaces(cfg *config) ([]*compute.NetworkInterface,
 		Subnetwork: cfg.subnetwork,
 	}
 
+	klog.Infof("using network:%s subnetwork: %s", cfg.network, cfg.subnetwork)
+
 	if cfg.assignPublicIPAddress {
-		ifc.AccessConfigs = []*compute.AccessConfig{{
-			Name: "External NAT",
-			Type: "ONE_TO_ONE_NAT",
-		}}
+		ifc.AccessConfigs = []*compute.AccessConfig{
+			{
+				Name: "External NAT",
+				Type: "ONE_TO_ONE_NAT",
+			},
+		}
 	}
 
+	// Setup IPv6
+	// GCP allocates public IPv6 addr so we only try to setup IPv6
+	// if assigning public IP addresses is enabled.
+	if cfg.assignPublicIPAddress {
+		// GCP doesn't support IPv6 only stack
+		if cfg.providerConfig.Network.GetIPFamily() == util.DualStack {
+			ifc.StackType = "IPV4_IPV6"
+
+			ifc.Ipv6AccessConfigs = []*compute.AccessConfig{
+				{
+					Name:        "external-ipv6",
+					NetworkTier: "PREMIUM",
+					Type:        "DIRECT_IPV6",
+				},
+			}
+		} else {
+			klog.Infof("IP family doesn't specify dual stack: %s", cfg.providerConfig.Network.GetIPFamily())
+		}
+	}
 	return []*compute.NetworkInterface{ifc}, nil
 }
 

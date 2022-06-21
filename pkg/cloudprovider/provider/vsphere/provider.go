@@ -199,24 +199,26 @@ func (p *provider) getConfig(provSpec clusterv1alpha1.ProviderSpec) (*Config, *p
 	return &c, pconfig, rawConfig, nil
 }
 
-func (p *provider) Validate(spec clusterv1alpha1.MachineSpec) error {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+func (p *provider) Validate(ctx context.Context, spec clusterv1alpha1.MachineSpec) error {
 	config, pc, _, err := p.getConfig(spec.ProviderSpec)
 	if err != nil {
-		return fmt.Errorf("failed to get config: %v", err)
+		return fmt.Errorf("failed to get config: %w", err)
+	}
+
+	if pc.OperatingSystem == providerconfigtypes.OperatingSystemSLES {
+		return fmt.Errorf("invalid/not supported operating system specified %q: %w", pc.OperatingSystem, providerconfigtypes.ErrOSNotSupported)
 	}
 
 	session, err := NewSession(ctx, config)
 	if err != nil {
-		return fmt.Errorf("failed to create vCenter session: %v", err)
+		return fmt.Errorf("failed to create vCenter session: %w", err)
 	}
-	defer session.Logout()
+	defer session.Logout(ctx)
 
 	if config.Tags != nil {
 		restAPISession, err := NewRESTSession(ctx, config)
 		if err != nil {
-			return fmt.Errorf("failed to create REST API session: %v", err)
+			return fmt.Errorf("failed to create REST API session: %w", err)
 		}
 		defer restAPISession.Logout(ctx)
 		tagManager := tags.NewManager(restAPISession.Client)
@@ -239,18 +241,18 @@ func (p *provider) Validate(spec clusterv1alpha1.MachineSpec) error {
 	// present, otherwise an error is raised.
 	if config.DatastoreCluster != "" && config.Datastore == "" {
 		if _, err := session.Finder.DatastoreCluster(ctx, config.DatastoreCluster); err != nil {
-			return fmt.Errorf("failed to get datastore cluster %s: %v", config.DatastoreCluster, err)
+			return fmt.Errorf("failed to get datastore cluster %s: %w", config.DatastoreCluster, err)
 		}
 	} else if config.Datastore != "" && config.DatastoreCluster == "" {
 		if _, err := session.Finder.Datastore(ctx, config.Datastore); err != nil {
-			return fmt.Errorf("failed to get datastore %s: %v", config.Datastore, err)
+			return fmt.Errorf("failed to get datastore %s: %w", config.Datastore, err)
 		}
 	} else {
-		return fmt.Errorf("one between datastore and datastore cluster should be specified: %v", err)
+		return fmt.Errorf("one between datastore and datastore cluster should be specified: %w", err)
 	}
 
 	if _, err := session.Finder.Folder(ctx, config.Folder); err != nil {
-		return fmt.Errorf("failed to get folder %q: %v", config.Folder, err)
+		return fmt.Errorf("failed to get folder %q: %w", config.Folder, err)
 	}
 
 	if _, err := p.get(ctx, config.Folder, spec, session.Finder); err == nil {
@@ -259,18 +261,18 @@ func (p *provider) Validate(spec clusterv1alpha1.MachineSpec) error {
 
 	if config.ResourcePool != "" {
 		if _, err := session.Finder.ResourcePool(ctx, config.ResourcePool); err != nil {
-			return fmt.Errorf("failed to get resourcepool %q: %v", config.ResourcePool, err)
+			return fmt.Errorf("failed to get resourcepool %q: %w", config.ResourcePool, err)
 		}
 	}
 
 	templateVM, err := session.Finder.VirtualMachine(ctx, config.TemplateVMName)
 	if err != nil {
-		return fmt.Errorf("failed to get template vm %q: %v", config.TemplateVMName, err)
+		return fmt.Errorf("failed to get template vm %q: %w", config.TemplateVMName, err)
 	}
 
 	disks, err := getDisksFromVM(ctx, templateVM)
 	if err != nil {
-		return fmt.Errorf("failed to get disks from VM: %v", err)
+		return fmt.Errorf("failed to get disks from VM: %w", err)
 	}
 	if diskLen := len(disks); diskLen != 1 {
 		return fmt.Errorf("expected vm to have exactly one disk, had %d", diskLen)
@@ -280,9 +282,6 @@ func (p *provider) Validate(spec clusterv1alpha1.MachineSpec) error {
 		if err := validateDiskResizing(disks, *config.DiskSizeGB); err != nil {
 			return err
 		}
-	}
-	if pc.OperatingSystem == providerconfigtypes.OperatingSystemSLES {
-		return fmt.Errorf("invalid/not supported operating system specified %q: %v", pc.OperatingSystem, providerconfigtypes.ErrOSNotSupported)
 	}
 	return nil
 }
@@ -294,31 +293,29 @@ func machineInvalidConfigurationTerminalError(err error) error {
 	}
 }
 
-func (p *provider) Create(machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData, userdata string) (instance.Instance, error) {
-	vm, err := p.create(machine, userdata)
+func (p *provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData, userdata string) (instance.Instance, error) {
+	vm, err := p.create(ctx, machine, userdata)
 	if err != nil {
-		_, cleanupErr := p.Cleanup(machine, data)
+		_, cleanupErr := p.Cleanup(ctx, machine, data)
 		if cleanupErr != nil {
-			return nil, fmt.Errorf("cleaning up failed with err %v after creation failed with err %v", cleanupErr, err)
+			return nil, fmt.Errorf("cleaning up failed with err %v after creation failed with err %w", cleanupErr, err)
 		}
 		return nil, err
 	}
 	return vm, nil
 }
 
-func (p *provider) create(machine *clusterv1alpha1.Machine, userdata string) (instance.Instance, error) {
-	ctx := context.Background()
-
+func (p *provider) create(ctx context.Context, machine *clusterv1alpha1.Machine, userdata string) (instance.Instance, error) {
 	config, pc, _, err := p.getConfig(machine.Spec.ProviderSpec)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse config: %v", err)
+		return nil, fmt.Errorf("failed to parse config: %w", err)
 	}
 
 	session, err := NewSession(ctx, config)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create vCenter session: %v", err)
+		return nil, fmt.Errorf("failed to create vCenter session: %w", err)
 	}
-	defer session.Logout()
+	defer session.Logout(ctx)
 
 	var containerLinuxUserdata string
 	if pc.OperatingSystem == providerconfigtypes.OperatingSystemFlatcar {
@@ -333,23 +330,23 @@ func (p *provider) create(machine *clusterv1alpha1.Machine, userdata string) (in
 		containerLinuxUserdata,
 	)
 	if err != nil {
-		return nil, machineInvalidConfigurationTerminalError(fmt.Errorf("failed to create cloned vm: '%v'", err))
+		return nil, machineInvalidConfigurationTerminalError(fmt.Errorf("failed to create cloned vm: '%w'", err))
 	}
 
 	if err := createAndAttachTags(ctx, config, virtualMachine); err != nil {
-		return nil, fmt.Errorf("failed create and attach tags: %v", err)
+		return nil, fmt.Errorf("failed create and attach tags: %w", err)
 	}
 
 	if pc.OperatingSystem != providerconfigtypes.OperatingSystemFlatcar {
 		localUserdataIsoFilePath, err := generateLocalUserdataISO(userdata, machine.Spec.Name)
 		if err != nil {
-			return nil, fmt.Errorf("failed to generate local userdadata iso: %v", err)
+			return nil, fmt.Errorf("failed to generate local userdadata iso: %w", err)
 		}
 
 		defer func() {
 			err := os.Remove(localUserdataIsoFilePath)
 			if err != nil {
-				utilruntime.HandleError(fmt.Errorf("failed to clean up local userdata iso file at %s: %v", localUserdataIsoFilePath, err))
+				utilruntime.HandleError(fmt.Errorf("failed to clean up local userdata iso file at %s: %w", localUserdataIsoFilePath, err))
 			}
 		}()
 
@@ -357,57 +354,54 @@ func (p *provider) create(machine *clusterv1alpha1.Machine, userdata string) (in
 			// Destroy VM to avoid a leftover.
 			destroyTask, vmErr := virtualMachine.Destroy(ctx)
 			if vmErr != nil {
-				return nil, fmt.Errorf("failed to destroy vm %s after failing upload and attach userdata iso: %v / %v", virtualMachine.Name(), err, vmErr)
+				return nil, fmt.Errorf("failed to destroy vm %s after failing upload and attach userdata iso: %w / %v", virtualMachine.Name(), err, vmErr)
 			}
 			if vmErr := destroyTask.Wait(ctx); vmErr != nil {
-				return nil, fmt.Errorf("failed to destroy vm %s after failing upload and attach userdata iso: %v / %v", virtualMachine.Name(), err, vmErr)
+				return nil, fmt.Errorf("failed to destroy vm %s after failing upload and attach userdata iso: %w / %v", virtualMachine.Name(), err, vmErr)
 			}
-			return nil, machineInvalidConfigurationTerminalError(fmt.Errorf("failed to upload and attach userdata iso: %v", err))
+			return nil, machineInvalidConfigurationTerminalError(fmt.Errorf("failed to upload and attach userdata iso: %w", err))
 		}
 	}
 
 	powerOnTask, err := virtualMachine.PowerOn(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to power on machine: %v", err)
+		return nil, fmt.Errorf("failed to power on machine: %w", err)
 	}
 
 	if err := powerOnTask.Wait(ctx); err != nil {
-		return nil, fmt.Errorf("error when waiting for vm powerOn task: %v", err)
+		return nil, fmt.Errorf("error when waiting for vm powerOn task: %w", err)
 	}
 
 	return Server{name: virtualMachine.Name(), status: instance.StatusRunning, id: virtualMachine.Reference().Value}, nil
 }
 
-func (p *provider) Cleanup(machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData) (bool, error) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
+func (p *provider) Cleanup(ctx context.Context, machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData) (bool, error) {
 	config, pc, _, err := p.getConfig(machine.Spec.ProviderSpec)
 	if err != nil {
-		return false, fmt.Errorf("failed to parse config: %v", err)
+		return false, fmt.Errorf("failed to parse config: %w", err)
 	}
 
 	session, err := NewSession(ctx, config)
 	if err != nil {
-		return false, fmt.Errorf("failed to create vCenter session: %v", err)
+		return false, fmt.Errorf("failed to create vCenter session: %w", err)
 	}
-	defer session.Logout()
+	defer session.Logout(ctx)
 
 	virtualMachine, err := p.get(ctx, config.Folder, machine.Spec, session.Finder)
 	if err != nil {
 		if cloudprovidererrors.IsNotFound(err) {
 			return true, nil
 		}
-		return false, fmt.Errorf("failed to get instance from vSphere: %v", err)
+		return false, fmt.Errorf("failed to get instance from vSphere: %w", err)
 	}
 
 	if err := deleteTags(ctx, config, virtualMachine); err != nil {
-		return false, fmt.Errorf("failed to delete tags: %v", err)
+		return false, fmt.Errorf("failed to delete tags: %w", err)
 	}
 
 	powerState, err := virtualMachine.PowerState(ctx)
 	if err != nil {
-		return false, fmt.Errorf("failed to get virtual machine power state: %v", err)
+		return false, fmt.Errorf("failed to get virtual machine power state: %w", err)
 	}
 
 	// We cannot destroy a VM that's powered on, but we also
@@ -415,21 +409,21 @@ func (p *provider) Cleanup(machine *clusterv1alpha1.Machine, data *cloudprovider
 	if powerState != types.VirtualMachinePowerStatePoweredOff {
 		powerOffTask, err := virtualMachine.PowerOff(ctx)
 		if err != nil {
-			return false, fmt.Errorf("failed to poweroff vm %s: %v", virtualMachine.Name(), err)
+			return false, fmt.Errorf("failed to poweroff vm %s: %w", virtualMachine.Name(), err)
 		}
 		if err = powerOffTask.Wait(ctx); err != nil {
-			return false, fmt.Errorf("failed to poweroff vm %s: %v", virtualMachine.Name(), err)
+			return false, fmt.Errorf("failed to poweroff vm %s: %w", virtualMachine.Name(), err)
 		}
 	}
 
 	virtualMachineDeviceList, err := virtualMachine.Device(ctx)
 	if err != nil {
-		return false, fmt.Errorf("failed to get devices for virtual machine: %v", err)
+		return false, fmt.Errorf("failed to get devices for virtual machine: %w", err)
 	}
 
 	pvs := &corev1.PersistentVolumeList{}
 	if err := data.Client.List(data.Ctx, pvs); err != nil {
-		return false, fmt.Errorf("failed to list PVs: %v", err)
+		return false, fmt.Errorf("failed to list PVs: %w", err)
 	}
 
 	for _, pv := range pvs.Items {
@@ -441,7 +435,7 @@ func (p *provider) Cleanup(machine *clusterv1alpha1.Machine, data *cloudprovider
 				fileName := device.GetVirtualDevice().Backing.(types.BaseVirtualDeviceFileBackingInfo).GetVirtualDeviceFileBackingInfo().FileName
 				if pv.Spec.VsphereVolume.VolumePath == fileName {
 					if err := virtualMachine.RemoveDevice(ctx, true, device); err != nil {
-						return false, fmt.Errorf("error detaching pv-backing disk %s: %v", fileName, err)
+						return false, fmt.Errorf("error detaching pv-backing disk %s: %w", fileName, err)
 					}
 				}
 			}
@@ -450,14 +444,14 @@ func (p *provider) Cleanup(machine *clusterv1alpha1.Machine, data *cloudprovider
 
 	datastore, err := getDatastoreFromVM(ctx, session, virtualMachine)
 	if err != nil {
-		return false, fmt.Errorf("Error getting datastore from VM %s: %v", virtualMachine.Name(), err)
+		return false, fmt.Errorf("Error getting datastore from VM %s: %w", virtualMachine.Name(), err)
 	}
 	destroyTask, err := virtualMachine.Destroy(ctx)
 	if err != nil {
-		return false, fmt.Errorf("failed to destroy vm %s: %v", virtualMachine.Name(), err)
+		return false, fmt.Errorf("failed to destroy vm %s: %w", virtualMachine.Name(), err)
 	}
 	if err := destroyTask.Wait(ctx); err != nil {
-		return false, fmt.Errorf("failed to destroy vm %s: %v", virtualMachine.Name(), err)
+		return false, fmt.Errorf("failed to destroy vm %s: %w", virtualMachine.Name(), err)
 	}
 
 	if pc.OperatingSystem != providerconfigtypes.OperatingSystemFlatcar {
@@ -467,7 +461,7 @@ func (p *provider) Cleanup(machine *clusterv1alpha1.Machine, data *cloudprovider
 			if err.Error() == fmt.Sprintf("File [%s] %s was not found", datastore.Name(), virtualMachine.Name()) {
 				return true, nil
 			}
-			return false, fmt.Errorf("failed to delete storage of deleted instance %s: %v", virtualMachine.Name(), err)
+			return false, fmt.Errorf("failed to delete storage of deleted instance %s: %w", virtualMachine.Name(), err)
 		}
 	}
 
@@ -475,19 +469,17 @@ func (p *provider) Cleanup(machine *clusterv1alpha1.Machine, data *cloudprovider
 	return true, nil
 }
 
-func (p *provider) Get(machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData) (instance.Instance, error) {
-	ctx := context.Background()
-
+func (p *provider) Get(ctx context.Context, machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData) (instance.Instance, error) {
 	config, _, _, err := p.getConfig(machine.Spec.ProviderSpec)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse config: %v", err)
+		return nil, fmt.Errorf("failed to parse config: %w", err)
 	}
 
 	session, err := NewSession(ctx, config)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create vCenter session: %v", err)
+		return nil, fmt.Errorf("failed to create vCenter session: %w", err)
 	}
-	defer session.Logout()
+	defer session.Logout(ctx)
 
 	virtualMachine, err := p.get(ctx, config.Folder, machine.Spec, session.Finder)
 	if err != nil {
@@ -497,16 +489,16 @@ func (p *provider) Get(machine *clusterv1alpha1.Machine, data *cloudprovidertype
 
 	powerState, err := virtualMachine.PowerState(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get powerstate: %v", err)
+		return nil, fmt.Errorf("failed to get powerstate: %w", err)
 	}
 
 	if powerState != types.VirtualMachinePowerStatePoweredOn {
 		powerOnTask, err := virtualMachine.PowerOn(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("failed to power on instance that was in state %q: %v", powerState, err)
+			return nil, fmt.Errorf("failed to power on instance that was in state %q: %w", powerState, err)
 		}
 		if err := powerOnTask.Wait(ctx); err != nil {
-			return nil, fmt.Errorf("failed waiting for instance to be powered on: %v", err)
+			return nil, fmt.Errorf("failed waiting for instance to be powered on: %w", err)
 		}
 		// We must return here because the vendored code for determining if the guest
 		// utils are running yields an NPD when using with an instance that is not running
@@ -517,13 +509,13 @@ func (p *provider) Get(machine *clusterv1alpha1.Machine, data *cloudprovidertype
 	addresses := map[string]corev1.NodeAddressType{}
 	isGuestToolsRunning, err := virtualMachine.IsToolsRunning(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to check if guest utils are running: %v", err)
+		return nil, fmt.Errorf("failed to check if guest utils are running: %w", err)
 	}
 	if isGuestToolsRunning {
 		var moVirtualMachine mo.VirtualMachine
 		pc := property.DefaultCollector(session.Client.Client)
 		if err := pc.RetrieveOne(ctx, virtualMachine.Reference(), []string{"guest"}, &moVirtualMachine); err != nil {
-			return nil, fmt.Errorf("failed to retrieve guest info: %v", err)
+			return nil, fmt.Errorf("failed to retrieve guest info: %w", err)
 		}
 
 		for _, nic := range moVirtualMachine.Guest.Net {
@@ -541,14 +533,14 @@ func (p *provider) Get(machine *clusterv1alpha1.Machine, data *cloudprovidertype
 	return Server{name: virtualMachine.Name(), status: instance.StatusRunning, addresses: addresses, id: virtualMachine.Reference().Value}, nil
 }
 
-func (p *provider) MigrateUID(machine *clusterv1alpha1.Machine, new ktypes.UID) error {
+func (p *provider) MigrateUID(_ context.Context, _ *clusterv1alpha1.Machine, _ ktypes.UID) error {
 	return nil
 }
 
 func (p *provider) GetCloudConfig(spec clusterv1alpha1.MachineSpec) (config string, name string, err error) {
 	c, _, _, err := p.getConfig(spec.ProviderSpec)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to parse config: %v", err)
+		return "", "", fmt.Errorf("failed to parse config: %w", err)
 	}
 
 	passedURL := c.VSphereURL
@@ -559,7 +551,7 @@ func (p *provider) GetCloudConfig(spec clusterv1alpha1.MachineSpec) (config stri
 
 	u, err := url.Parse(passedURL)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to parse '%s' as url: %v", passedURL, err)
+		return "", "", fmt.Errorf("failed to parse '%s' as url: %w", passedURL, err)
 	}
 
 	workingDir := c.Folder
@@ -596,7 +588,7 @@ func (p *provider) GetCloudConfig(spec clusterv1alpha1.MachineSpec) (config stri
 
 	s, err := vspheretypes.CloudConfigToString(cc)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to convert the cloud-config to string: %v", err)
+		return "", "", fmt.Errorf("failed to convert the cloud-config to string: %w", err)
 	}
 
 	return s, "vsphere", nil
@@ -625,7 +617,7 @@ func (p *provider) get(ctx context.Context, folder string, spec clusterv1alpha1.
 		if err.Error() == fmt.Sprintf("vm '%s' not found", path) {
 			return nil, cloudprovidererrors.ErrInstanceNotFound
 		}
-		return nil, fmt.Errorf("failed to list virtual machines: %v", err)
+		return nil, fmt.Errorf("failed to list virtual machines: %w", err)
 	}
 
 	if len(virtualMachineList) == 0 {

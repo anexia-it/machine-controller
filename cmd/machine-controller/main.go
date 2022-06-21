@@ -32,7 +32,7 @@ import (
 	"github.com/kubermatic/machine-controller/pkg/apis/cluster/v1alpha1/migrations"
 	cloudprovidertypes "github.com/kubermatic/machine-controller/pkg/cloudprovider/types"
 	"github.com/kubermatic/machine-controller/pkg/cloudprovider/util"
-	"github.com/kubermatic/machine-controller/pkg/clusterinfo"
+	clusterinfo "github.com/kubermatic/machine-controller/pkg/clusterinfo"
 	"github.com/kubermatic/machine-controller/pkg/containerruntime"
 	machinecontroller "github.com/kubermatic/machine-controller/pkg/controller/machine"
 	machinedeploymentcontroller "github.com/kubermatic/machine-controller/pkg/controller/machinedeployment"
@@ -41,7 +41,6 @@ import (
 	"github.com/kubermatic/machine-controller/pkg/health"
 	machinesv1alpha1 "github.com/kubermatic/machine-controller/pkg/machines/v1alpha1"
 	"github.com/kubermatic/machine-controller/pkg/node"
-	"github.com/kubermatic/machine-controller/pkg/signals"
 	osmv1alpha1 "k8c.io/operating-system-manager/pkg/crd/osm/v1alpha1"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -53,6 +52,7 @@ import (
 	"k8s.io/klog"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	"sigs.k8s.io/controller-runtime/pkg/manager/signals"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
@@ -72,52 +72,53 @@ var (
 
 	useOSM bool
 
-	nodeCSRApprover               bool
-	nodeHTTPProxy                 string
-	nodeNoProxy                   string
-	nodeInsecureRegistries        string
-	nodeRegistryMirrors           string
-	nodePauseImage                string
-	nodeContainerRuntime          string
-	podCIDRs                      string
-	nodePortRange                 string
-	nodeRegistryCredentialsSecret string
-	nodeContainerdRegistryMirrors = containerruntime.RegistryMirrorsFlags{}
+	nodeCSRApprover                   bool
+	nodeHTTPProxy                     string
+	nodeNoProxy                       string
+	nodeInsecureRegistries            string
+	nodeRegistryMirrors               string
+	nodePauseImage                    string
+	nodeContainerRuntime              string
+	podCIDR                           string
+	nodePortRange                     string
+	nodeRegistryCredentialsSecret     string
+	nodeContainerdRegistryMirrors     = containerruntime.RegistryMirrorsFlags{}
+	overrideBootstrapKubeletAPIServer string
 )
 
 const (
 	defaultLeaderElectionNamespace = "kube-system"
 )
 
-// controllerRunOptions holds data that are required to create and run machine controller
+// controllerRunOptions holds data that are required to create and run machine controller.
 type controllerRunOptions struct {
-	// kubeClient a client that knows how to consume kubernetes API
+	// kubeClient a client that knows how to consume kubernetes API.
 	kubeClient *kubernetes.Clientset
 
-	// metrics a struct that holds all metrics we want to collect
+	// metrics a struct that holds all metrics we want to collect.
 	metrics *machinecontroller.MetricsCollection
 
-	// kubeconfigProvider knows how to get cluster information stored under a ConfigMap
+	// kubeconfigProvider knows how to get cluster information stored under a ConfigMap.
 	kubeconfigProvider machinecontroller.KubeconfigProvider
 
-	// name of the controller. When set the controller will only process machines with the label "machine.k8s.io/controller": name
+	// name of the controller. When set the controller will only process machines with the label "machine.k8s.io/controller": name.
 	name string
 
-	// Name of the ServiceAccount from which the bootstrap token secret will be fetched. A bootstrap token will be created
+	// Name of the ServiceAccount from which the bootstrap token secret will be fetched. A bootstrap token will be created.
 	// if this is nil
 	bootstrapTokenServiceAccountName *types.NamespacedName
 
-	// prometheusRegisterer is used by the MachineController instance to register its metrics
+	// prometheusRegisterer is used by the MachineController instance to register its metrics.
 	prometheusRegisterer prometheus.Registerer
 
-	// The cfg is used by the migration to conditionally spawn additional clients
+	// The cfg is used by the migration to conditionally spawn additional clients.
 	cfg *restclient.Config
 
-	// The timeout in which machines owned by a MachineSet must join the cluster to avoid being
+	// The timeout in which machines owned by a MachineSet must join the cluster to avoid being.
 	// deleted by the machine-controller
 	joinClusterTimeout *time.Duration
 
-	// Will instruct the machine-controller to skip the eviction if the machine deletion is older than skipEvictionAfter
+	// Will instruct the machine-controller to skip the eviction if the machine deletion is older than skipEvictionAfter.
 	skipEvictionAfter time.Duration
 
 	// Enable NodeCSRApprover controller to automatically approve node serving certificate requests.
@@ -127,11 +128,10 @@ type controllerRunOptions struct {
 
 	useOSM bool
 
-	// Assigns the POD networks that will be allocated.
-	podCIDRs []string
-
-	// A port range to reserve for services with NodePort visibility
+	// A port range to reserve for services with NodePort visibility.
 	nodePortRange string
+
+	overrideBootstrapKubeletAPIServer string
 }
 
 func main() {
@@ -139,8 +139,8 @@ func main() {
 
 	klog.InitFlags(nil)
 	// This is also being registered in kubevirt.io/kubevirt/pkg/kubecli/kubecli.go so
-	// we have to guard it
-	//TODO: Evaluate alternatives to importing the CLI. Generate our own client? Use a dynamic client?
+	// we have to guard it.
+	// TODO: Evaluate alternatives to importing the CLI. Generate our own client? Use a dynamic client?
 	if flag.Lookup("kubeconfig") == nil {
 		flag.StringVar(&kubeconfig, "kubeconfig", "", "Path to a kubeconfig. Only required if out-of-cluster.")
 	}
@@ -166,10 +166,11 @@ func main() {
 	flag.Var(&nodeContainerdRegistryMirrors, "node-containerd-registry-mirrors", "Configure registry mirrors endpoints. Can be used multiple times to specify multiple mirrors")
 	flag.StringVar(&caBundleFile, "ca-bundle", "", "path to a file containing all PEM-encoded CA certificates (will be used instead of the host's certificates if set)")
 	flag.BoolVar(&nodeCSRApprover, "node-csr-approver", true, "Enable NodeCSRApprover controller to automatically approve node serving certificate requests")
-	flag.StringVar(&podCIDRs, "pod-cidr", "172.25.0.0/16", "Comma separated network ranges from which POD networks are allocated. Example: 172.25.0.0/16,fd00::/104")
+	flag.StringVar(&podCIDR, "pod-cidr", "172.25.0.0/16", "WARNING: flag is unused, kept only for backwards compatibility")
 	flag.StringVar(&nodePortRange, "node-port-range", "30000-32767", "A port range to reserve for services with NodePort visibility")
-	flag.StringVar(&nodeRegistryCredentialsSecret, "node-registry-credentials-secret", "", "A Secret object reference, that containt auth info for image registry in namespace/secret-name form, example: kube-system/registry-credentials. See doc at https://github.com/kubermaric/machine-controller/blob/master/docs/registry-authentication.md")
+	flag.StringVar(&nodeRegistryCredentialsSecret, "node-registry-credentials-secret", "", "A Secret object reference, that contains auth info for image registry in namespace/secret-name form, example: kube-system/registry-credentials. See doc at https://github.com/kubermaric/machine-controller/blob/master/docs/registry-authentication.md")
 	flag.BoolVar(&useOSM, "use-osm", false, "use osm controller for node bootstrap")
+	flag.StringVar(&overrideBootstrapKubeletAPIServer, "override-bootstrap-kubelet-apiserver", "", "Override for the API server address used in worker nodes bootstrap-kubelet.conf")
 
 	flag.Parse()
 	kubeconfig = flag.Lookup("kubeconfig").Value.(flag.Getter).Get().(string)
@@ -229,7 +230,6 @@ func main() {
 	if err != nil {
 		klog.Fatalf("error building kubernetes clientset for kubeClient: %v", err)
 	}
-
 	kubeconfigProvider := clusterinfo.New(cfg, kubeClient)
 
 	ctrlMetrics := machinecontroller.NewMachineControllerMetrics()
@@ -265,9 +265,9 @@ func main() {
 			RegistryCredentialsSecretRef: nodeRegistryCredentialsSecret,
 			ContainerRuntime:             containerRuntimeConfig,
 		},
-		useOSM:        useOSM,
-		podCIDRs:      strings.Split(podCIDRs, ","),
-		nodePortRange: nodePortRange,
+		useOSM:                            useOSM,
+		nodePortRange:                     nodePortRange,
+		overrideBootstrapKubeletAPIServer: overrideBootstrapKubeletAPIServer,
 	}
 
 	if err := nodeFlags.UpdateNodeSettings(&runOptions.node); err != nil {
@@ -286,13 +286,10 @@ func main() {
 		runOptions.bootstrapTokenServiceAccountName = &types.NamespacedName{Namespace: flagParts[0], Name: flagParts[1]}
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	signalCh := signals.SetupSignalHandler()
+	ctx := signals.SetupSignalHandler()
 	go func() {
-		<-signalCh
+		<-ctx.Done()
 		klog.Info("caught signal, shutting down...")
-		cancel()
 	}()
 
 	mgr, err := createManager(5*time.Minute, runOptions)
@@ -315,19 +312,19 @@ func createManager(syncPeriod time.Duration, options controllerRunOptions) (mana
 		MetricsBindAddress:      metricsAddress,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("error building ctrlruntime manager: %v", err)
+		return nil, fmt.Errorf("error building ctrlruntime manager: %w", err)
 	}
 
 	if err := mgr.AddReadyzCheck("alive", healthz.Ping); err != nil {
-		return nil, fmt.Errorf("failed to add readiness check: %v", err)
+		return nil, fmt.Errorf("failed to add readiness check: %w", err)
 	}
 
 	if err := mgr.AddHealthzCheck("kubeconfig", health.KubeconfigAvailable(options.kubeconfigProvider)); err != nil {
-		return nil, fmt.Errorf("failed to add health check: %v", err)
+		return nil, fmt.Errorf("failed to add health check: %w", err)
 	}
 
 	if err := mgr.AddHealthzCheck("apiserver-connection", health.ApiserverReachable(options.kubeClient)); err != nil {
-		return nil, fmt.Errorf("failed to add health check: %v", err)
+		return nil, fmt.Errorf("failed to add health check: %w", err)
 	}
 
 	if profiling {
@@ -339,7 +336,7 @@ func createManager(syncPeriod time.Duration, options controllerRunOptions) (mana
 		m.HandleFunc("/trace", pprof.Trace)
 
 		if err := mgr.AddMetricsExtraHandler("/debug/pprof/", m); err != nil {
-			return nil, fmt.Errorf("failed to add pprof http handlers: %v", err)
+			return nil, fmt.Errorf("failed to add pprof http handlers: %w", err)
 		}
 	}
 
@@ -347,7 +344,7 @@ func createManager(syncPeriod time.Duration, options controllerRunOptions) (mana
 		mgr: mgr,
 		opt: options,
 	}); err != nil {
-		return nil, fmt.Errorf("failed to add bootstrap runnable: %v", err)
+		return nil, fmt.Errorf("failed to add bootstrap runnable: %w", err)
 	}
 
 	return mgr, nil
@@ -358,7 +355,7 @@ type controllerBootstrap struct {
 	opt controllerRunOptions
 }
 
-// NeedLeaderElection implements manager.LeaderElectionRunnable
+// NeedLeaderElection implements manager.LeaderElectionRunnable.
 func (bs *controllerBootstrap) NeedLeaderElection() bool {
 	return true
 }
@@ -375,14 +372,14 @@ func (bs *controllerBootstrap) Start(ctx context.Context) error {
 		Client: client,
 	}
 
-	// Migrate MachinesV1Alpha1Machine to ClusterV1Alpha1Machine
+	// Migrate MachinesV1Alpha1Machine to ClusterV1Alpha1Machine.
 	if err := migrations.MigrateMachinesv1Alpha1MachineToClusterv1Alpha1MachineIfNecessary(ctx, client, bs.opt.kubeClient, providerData); err != nil {
-		return fmt.Errorf("migration to clusterv1alpha1 failed: %v", err)
+		return fmt.Errorf("migration to clusterv1alpha1 failed: %w", err)
 	}
 
-	// Migrate providerConfig field to providerSpec field
+	// Migrate providerConfig field to providerSpec field.
 	if err := migrations.MigrateProviderConfigToProviderSpecIfNecesary(ctx, bs.opt.cfg, client); err != nil {
-		return fmt.Errorf("migration of providerConfig field to providerSpec field failed: %v", err)
+		return fmt.Errorf("migration of providerConfig field to providerSpec field failed: %w", err)
 	}
 
 	machineCollector := machinecontroller.NewMachineCollector(ctx, bs.mgr.GetClient())
@@ -402,23 +399,23 @@ func (bs *controllerBootstrap) Start(ctx context.Context) error {
 		bs.opt.skipEvictionAfter,
 		bs.opt.node,
 		bs.opt.useOSM,
-		bs.opt.podCIDRs,
 		bs.opt.nodePortRange,
+		bs.opt.overrideBootstrapKubeletAPIServer,
 	); err != nil {
-		return fmt.Errorf("failed to add Machine controller to manager: %v", err)
+		return fmt.Errorf("failed to add Machine controller to manager: %w", err)
 	}
 
 	if err := machinesetcontroller.Add(bs.mgr); err != nil {
-		return fmt.Errorf("failed to add MachineSet controller to manager: %v", err)
+		return fmt.Errorf("failed to add MachineSet controller to manager: %w", err)
 	}
 
 	if err := machinedeploymentcontroller.Add(bs.mgr); err != nil {
-		return fmt.Errorf("failed to add MachineDeployment controller to manager: %v", err)
+		return fmt.Errorf("failed to add MachineDeployment controller to manager: %w", err)
 	}
 
 	if bs.opt.nodeCSRApprover {
 		if err := nodecsrapprover.Add(bs.mgr); err != nil {
-			return fmt.Errorf("failed to add NodeCSRApprover controller to manager: %v", err)
+			return fmt.Errorf("failed to add NodeCSRApprover controller to manager: %w", err)
 		}
 	}
 

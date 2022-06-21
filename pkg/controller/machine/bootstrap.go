@@ -31,12 +31,12 @@ import (
 	providerconfigtypes "github.com/kubermatic/machine-controller/pkg/providerconfig/types"
 	"github.com/kubermatic/machine-controller/pkg/userdata/convert"
 	"github.com/kubermatic/machine-controller/pkg/userdata/helper"
+	"github.com/kubermatic/machine-controller/pkg/userdata/rhel"
 
 	ctrlruntimeclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 func getOSMBootstrapUserdata(ctx context.Context, client ctrlruntimeclient.Client, req plugin.UserDataRequest, secretName string) (string, error) {
-
 	var clusterName string
 	for key := range req.Kubeconfig.Clusters {
 		clusterName = key
@@ -44,18 +44,18 @@ func getOSMBootstrapUserdata(ctx context.Context, client ctrlruntimeclient.Clien
 
 	token, err := util.ExtractAPIServerToken(ctx, client)
 	if err != nil {
-		return "", fmt.Errorf("failed to fetch api-server token: %v", err)
+		return "", fmt.Errorf("failed to fetch api-server token: %w", err)
 	}
 
 	// Retrieve provider config from machine
 	pconfig, err := providerconfigtypes.GetConfig(req.MachineSpec.ProviderSpec)
 	if err != nil {
-		return "", fmt.Errorf("failed to get providerSpec: %v", err)
+		return "", fmt.Errorf("failed to get providerSpec: %w", err)
 	}
 
 	bootstrapKubeconfig, err := helper.StringifyKubeconfig(req.Kubeconfig)
 	if err != nil {
-		return "", fmt.Errorf("failed to format bootstrap kubeconfig: %v", err)
+		return "", fmt.Errorf("failed to format bootstrap kubeconfig: %w", err)
 	}
 
 	// Regardless if the provisioningUtility is set to use cloud-init, we only allow using ignition to provision flatcar
@@ -64,11 +64,11 @@ func getOSMBootstrapUserdata(ctx context.Context, client ctrlruntimeclient.Clien
 		return getOSMBootstrapUserDataForIgnition(req, pconfig.SSHPublicKeys, token, secretName, clusterName, bootstrapKubeconfig)
 	}
 
-	// cloud-init is used for all other operating systems
+	// cloud-init is used for all other operating systems.
 	return getOSMBootstrapUserDataForCloudInit(req, pconfig, token, secretName, clusterName, bootstrapKubeconfig)
 }
 
-// getOSMBootstrapUserDataForIgnition returns the userdata for the ignition bootstrap config
+// getOSMBootstrapUserDataForIgnition returns the userdata for the ignition bootstrap config.
 func getOSMBootstrapUserDataForIgnition(req plugin.UserDataRequest, sshPublicKeys []string, token, secretName, clusterName, bootstrapKfg string) (string, error) {
 	data := struct {
 		Token      string
@@ -81,16 +81,16 @@ func getOSMBootstrapUserDataForIgnition(req plugin.UserDataRequest, sshPublicKey
 	}
 	bsScript, err := template.New("bootstrap-script").Parse(ignitionBootstrapBinContentTemplate)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse bootstrapBinContentTemplate template for ignition: %v", err)
+		return "", fmt.Errorf("failed to parse bootstrapBinContentTemplate template for ignition: %w", err)
 	}
 	script := &bytes.Buffer{}
 	err = bsScript.Execute(script, data)
 	if err != nil {
-		return "", fmt.Errorf("failed to execute bootstrapBinContentTemplate template for ignition: %v", err)
+		return "", fmt.Errorf("failed to execute bootstrapBinContentTemplate template for ignition: %w", err)
 	}
 	bsIgnitionConfig, err := template.New("bootstrap-ignition-config").Funcs(sprig.TxtFuncMap()).Parse(ignitionTemplate)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse bootstrap-ignition-config template: %v", err)
+		return "", fmt.Errorf("failed to parse bootstrap-ignition-config template: %w", err)
 	}
 
 	ignitionConfig := &bytes.Buffer{}
@@ -108,13 +108,13 @@ func getOSMBootstrapUserDataForIgnition(req plugin.UserDataRequest, sshPublicKey
 		BootstrapKubeconfig: bootstrapKfg,
 	})
 	if err != nil {
-		return "", fmt.Errorf("failed to execute ignitionTemplate template: %v", err)
+		return "", fmt.Errorf("failed to execute ignitionTemplate template: %w", err)
 	}
 
 	return convert.ToIgnition(ignitionConfig.String())
 }
 
-// getOSMBootstrapUserDataForCloudInit returns the userdata for the cloud-init bootstrap script
+// getOSMBootstrapUserDataForCloudInit returns the userdata for the cloud-init bootstrap script.
 func getOSMBootstrapUserDataForCloudInit(req plugin.UserDataRequest, pconfig *providerconfigtypes.Config, token, secretName, clusterName, bootstrapKfg string) (string, error) {
 	data := struct {
 		Token           string
@@ -123,6 +123,7 @@ func getOSMBootstrapUserDataForCloudInit(req plugin.UserDataRequest, pconfig *pr
 		MachineName     string
 		EnterpriseLinux bool
 		ProviderSpec    *providerconfigtypes.Config
+		RHELConfig      rhel.Config
 	}{
 		Token:        token,
 		SecretName:   secretName,
@@ -132,47 +133,52 @@ func getOSMBootstrapUserDataForCloudInit(req plugin.UserDataRequest, pconfig *pr
 	}
 
 	var (
-		bsScript *template.Template
-		err      error
+		rhelConfig *rhel.Config
+		bsScript   *template.Template
+		err        error
 	)
 
 	switch pconfig.OperatingSystem {
 	case providerconfigtypes.OperatingSystemUbuntu:
 		bsScript, err = template.New("bootstrap-cloud-init").Parse(bootstrapAptBinContentTemplate)
 		if err != nil {
-			return "", fmt.Errorf("failed to parse bootstrapAptBinContentTemplate template: %v", err)
+			return "", fmt.Errorf("failed to parse bootstrapAptBinContentTemplate template: %w", err)
 		}
 	case providerconfigtypes.OperatingSystemCentOS:
 		data.EnterpriseLinux = true
 		bsScript, err = template.New("bootstrap-cloud-init").Parse(bootstrapYumBinContentTemplate)
 		if err != nil {
-			return "", fmt.Errorf("failed to parse bootstrapYumBinContentTemplate template: %v", err)
+			return "", fmt.Errorf("failed to parse bootstrapYumBinContentTemplate template: %w", err)
 		}
 	case providerconfigtypes.OperatingSystemAmazonLinux2:
 		bsScript, err = template.New("bootstrap-cloud-init").Parse(bootstrapYumBinContentTemplate)
 		if err != nil {
-			return "", fmt.Errorf("failed to parse bootstrapYumBinContentTemplate template: %v", err)
+			return "", fmt.Errorf("failed to parse bootstrapYumBinContentTemplate template: %w", err)
 		}
 	case providerconfigtypes.OperatingSystemSLES:
 		bsScript, err = template.New("bootstrap-cloud-init").Parse(bootstrapZypperBinContentTemplate)
 		if err != nil {
-			return "", fmt.Errorf("failed to parse bootstrapZypperBinContentTemplate template: %v", err)
+			return "", fmt.Errorf("failed to parse bootstrapZypperBinContentTemplate template: %w", err)
 		}
 	case providerconfigtypes.OperatingSystemRHEL:
+		rhelConfig, err = rhel.LoadConfig(pconfig.OperatingSystemSpec)
+		if err != nil {
+			return "", fmt.Errorf("failed to parse OperatingSystemSpec: %w", err)
+		}
 		bsScript, err = template.New("bootstrap-cloud-init").Parse(bootstrapYumBinContentTemplate)
 		if err != nil {
-			return "", fmt.Errorf("failed to parse bootstrapYumBinContentTemplate template: %v", err)
+			return "", fmt.Errorf("failed to parse bootstrapYumBinContentTemplate template: %w", err)
 		}
 	}
 
 	script := &bytes.Buffer{}
 	err = bsScript.Execute(script, data)
 	if err != nil {
-		return "", fmt.Errorf("failed to execute bootstrap script template: %v", err)
+		return "", fmt.Errorf("failed to execute bootstrap script template: %w", err)
 	}
 	bsCloudInit, err := template.New("bootstrap-cloud-init").Parse(cloudInitTemplate)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse download-binaries template: %v", err)
+		return "", fmt.Errorf("failed to parse download-binaries template: %w", err)
 	}
 
 	cloudInit := &bytes.Buffer{}
@@ -182,15 +188,17 @@ func getOSMBootstrapUserDataForCloudInit(req plugin.UserDataRequest, pconfig *pr
 		plugin.UserDataRequest
 		ProviderSpec        *providerconfigtypes.Config
 		BootstrapKubeconfig string
+		RHELConfig          *rhel.Config
 	}{
 		Script:              base64.StdEncoding.EncodeToString(script.Bytes()),
 		Service:             base64.StdEncoding.EncodeToString([]byte(bootstrapServiceContentTemplate)),
 		UserDataRequest:     req,
 		ProviderSpec:        pconfig,
 		BootstrapKubeconfig: base64.StdEncoding.EncodeToString([]byte(bootstrapKfg)),
+		RHELConfig:          rhelConfig,
 	})
 	if err != nil {
-		return "", fmt.Errorf("failed to execute cloudInitTemplate template: %v", err)
+		return "", fmt.Errorf("failed to execute cloudInitTemplate template: %w", err)
 	}
 	return cloudInit.String(), nil
 }
@@ -238,7 +246,9 @@ fi
 {{- if .EnterpriseLinux }}
 yum install epel-release -y
 {{- end }}
+
 yum install -y curl jq
+
 curl -s -k -v --header 'Authorization: Bearer {{ .Token }}' {{ .ServerURL }}/api/v1/namespaces/cloud-init-settings/secrets/{{ .SecretName }} | jq '.data["cloud-config"]' -r| base64 -d > /etc/cloud/cloud.cfg.d/{{ .SecretName }}.cfg
 cloud-init clean
 cloud-init --file /etc/cloud/cloud.cfg.d/{{ .SecretName }}.cfg init
@@ -305,7 +315,7 @@ write_files:
   encoding: b64
   content: |
     {{ .BootstrapKubeconfig }}
-{{- if and (eq .ProviderSpec.CloudProvider "openstack") (eq .ProviderSpec.OperatingSystem "centos") }}
+{{- if and (eq .ProviderSpec.CloudProvider "openstack") (or (eq .ProviderSpec.OperatingSystem "centos") (eq .ProviderSpec.OperatingSystem "rhel")) }}
 {{- /*  The normal way of setting it via cloud-init is broken, see */}}
 {{- /*  https://bugs.launchpad.net/cloud-init/+bug/1662542 */}}
 - path: /etc/hostname
@@ -328,6 +338,19 @@ write_files:
 runcmd:
 - systemctl restart bootstrap.service
 - systemctl daemon-reload
+{{- if .RHELConfig }}
+rh_subscription:
+{{- if .RHELConfig.RHELUseSatelliteServer }}
+  org: "{{.RHELConfig.RHELOrganizationName}}"
+  activation-key: "{{.RHELConfig.RHELActivationKey}}"
+  server-hostname: {{ .RHELConfig.RHELSatelliteServer }}
+  rhsm-baseurl: https://{{ .RHELConfig.RHELSatelliteServer }}/pulp/repos
+{{- else }}
+  username: "{{.RHELConfig.RHELSubscriptionManagerUser}}"
+  password: "{{.RHELConfig.RHELSubscriptionManagerPassword}}"
+  auto-attach: {{.RHELConfig.AttachSubscription}}
+{{- end }}
+{{- end }}
 `
 
 	ignitionBootstrapBinContentTemplate = `#!/bin/bash
