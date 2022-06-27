@@ -21,10 +21,13 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/gophercloud/gophercloud/testhelper"
+	"go.anx.io/go-anxcloud/pkg/api/mock"
+	vspherev1 "go.anx.io/go-anxcloud/pkg/apis/vsphere/v1"
 	anxclient "go.anx.io/go-anxcloud/pkg/client"
 	"go.anx.io/go-anxcloud/pkg/ipam/address"
 	"go.anx.io/go-anxcloud/pkg/vsphere/provisioning/progress"
@@ -46,6 +49,12 @@ const TestIdentifier = "TestIdent"
 func TestAnexiaProvider(t *testing.T) {
 	testhelper.SetupHTTP()
 	client, server := anxclient.NewTestClient(nil, testhelper.Mux)
+
+	a := mock.NewMockAPI()
+	a.FakeExisting(&vspherev1.Template{Identifier: "TEMPLATE-ID-OLD-BUILD", Name: "TEMPLATE-NAME", Build: "b01"})
+	a.FakeExisting(&vspherev1.Template{Identifier: "TEMPLATE-ID", Name: "TEMPLATE-NAME", Build: "b02"})
+	a.FakeExisting(&vspherev1.Template{Identifier: "WRONG-TEMPLATE-NAME", Name: "Wrong Template Name", Build: "b02"})
+
 	t.Cleanup(func() {
 		testhelper.TeardownHTTP()
 		server.Close()
@@ -85,6 +94,9 @@ func TestAnexiaProvider(t *testing.T) {
 
 	t.Run("Test provision VM", func(t *testing.T) {
 		t.Parallel()
+
+		var lastProvisionedTemplateID string
+
 		testhelper.Mux.HandleFunc("/api/ipam/v1/address/reserve/ip/count.json", func(writer http.ResponseWriter, request *http.Request) {
 			err := json.NewEncoder(writer).Encode(address.ReserveRandomSummary{
 				Data: []address.ReservedIP{
@@ -97,7 +109,15 @@ func TestAnexiaProvider(t *testing.T) {
 			testhelper.AssertNoErr(t, err)
 		})
 
-		testhelper.Mux.HandleFunc("/api/vsphere/v1/provisioning/vm.json/LOCATION-ID/templates/TEMPLATE-ID", func(writer http.ResponseWriter, request *http.Request) {
+		vsphereProvisioningPrefix := "/api/vsphere/v1/provisioning/vm.json/LOCATION-ID/templates/"
+		testhelper.Mux.HandleFunc(vsphereProvisioningPrefix, func(writer http.ResponseWriter, request *http.Request) {
+			templateID := request.URL.Path[len(vsphereProvisioningPrefix):]
+			if err := a.Get(context.TODO(), &vspherev1.Template{Identifier: templateID}); err != nil {
+				writer.WriteHeader(400)
+				return
+			}
+			lastProvisionedTemplateID = templateID
+
 			testhelper.TestMethod(t, request, http.MethodPost)
 			type jsonObject = map[string]interface{}
 			expectedJSON := map[string]interface{}{
@@ -149,30 +169,75 @@ func TestAnexiaProvider(t *testing.T) {
 			testhelper.AssertNoErr(t, err)
 		})
 
-		providerStatus := anxtypes.ProviderStatus{}
-		ctx := utils.CreateReconcileContext(context.Background(), utils.ReconcileContext{
-			Machine: &v1alpha1.Machine{
-				ObjectMeta: metav1.ObjectMeta{Name: "TestMachine"},
-			},
-			Status:   &providerStatus,
-			UserData: "",
-			Config: &anxtypes.Config{
-				VlanID:     "VLAN-ID",
-				LocationID: "LOCATION-ID",
-				TemplateID: "TEMPLATE-ID",
-				CPUs:       5,
-				Memory:     5,
-				DiskSize:   5,
-			},
-			ProviderData: &cloudprovidertypes.ProviderData{
-				Update: func(m *clusterv1alpha1.Machine, mods ...cloudprovidertypes.MachineModifier) error {
-					return nil
+		createReconcileContext := func(config *anxtypes.Config) utils.ReconcileContext {
+			return utils.ReconcileContext{
+				Machine: &v1alpha1.Machine{
+					ObjectMeta: metav1.ObjectMeta{Name: "TestMachine"},
 				},
-			},
-		})
+				Status:   &anxtypes.ProviderStatus{},
+				UserData: "",
+				Config:   config,
+				ProviderData: &cloudprovidertypes.ProviderData{
+					Update: func(m *clusterv1alpha1.Machine, mods ...cloudprovidertypes.MachineModifier) error {
+						return nil
+					},
+				},
+			}
+		}
 
-		err := provisionVM(ctx, client)
-		testhelper.AssertNoErr(t, err)
+		type testCase struct {
+			config             *anxtypes.Config
+			expectedError      string
+			expectedTemplateID string
+		}
+
+		testCases := []testCase{
+			// fail
+			{
+				// Template name does not exist
+				config:        &anxtypes.Config{VlanID: "VLAN-ID", LocationID: "LOCATION-ID", Template: "non-existing-template-name", CPUs: 5, Memory: 5, DiskSize: 5},
+				expectedError: "failed to retrieve named template",
+			},
+			{
+				// Template build does not exist
+				config:        &anxtypes.Config{VlanID: "VLAN-ID", LocationID: "LOCATION-ID", Template: "TEMPLATE-NAME", TemplateBuild: "b42", CPUs: 5, Memory: 5, DiskSize: 5},
+				expectedError: "failed to retrieve named template",
+			},
+			{
+				// Template ID does not exist
+				config:        &anxtypes.Config{VlanID: "VLAN-ID", LocationID: "LOCATION-ID", TemplateID: "non-existing-template-id", CPUs: 5, Memory: 5, DiskSize: 5},
+				expectedError: "could not execute VM provisioning request",
+			},
+			// pass
+			{
+				// With named template
+				config:             &anxtypes.Config{VlanID: "VLAN-ID", LocationID: "LOCATION-ID", Template: "TEMPLATE-NAME", CPUs: 5, Memory: 5, DiskSize: 5},
+				expectedTemplateID: "TEMPLATE-ID",
+			},
+			{
+				// With named template and not latest build
+				config:             &anxtypes.Config{VlanID: "VLAN-ID", LocationID: "LOCATION-ID", Template: "TEMPLATE-NAME", TemplateBuild: "b01", CPUs: 5, Memory: 5, DiskSize: 5},
+				expectedTemplateID: "TEMPLATE-ID-OLD-BUILD",
+			},
+			{
+				// With template by ID
+				config:             &anxtypes.Config{VlanID: "VLAN-ID", LocationID: "LOCATION-ID", TemplateID: "TEMPLATE-ID", CPUs: 5, Memory: 5, DiskSize: 5},
+				expectedTemplateID: "TEMPLATE-ID",
+			},
+		}
+
+		for _, testCase := range testCases {
+			ctx := utils.CreateReconcileContext(context.Background(), createReconcileContext(testCase.config))
+			lastProvisionedTemplateID = ""
+			err := provisionVM(ctx, a, client)
+			if testCase.expectedError == "" {
+				testhelper.AssertNoErr(t, err)
+				testhelper.AssertEquals(t, testCase.expectedTemplateID, lastProvisionedTemplateID)
+			} else {
+				testhelper.AssertErr(t, err)
+				testhelper.AssertEquals(t, true, strings.Contains(err.Error(), testCase.expectedError))
+			}
+		}
 	})
 
 	t.Run("Test is VM Provisioning", func(t *testing.T) {
@@ -255,7 +320,13 @@ func TestValidate(t *testing.T) {
 		ConfigTestCase{
 			Config: anxtypes.RawConfig{Token: newConfigVarString("TEST-TOKEN"), CPUs: 1, DiskSize: 5, Memory: 5,
 				LocationID: newConfigVarString("TLID")},
-			Error: errors.New("template id is missing"),
+			Error: errors.New("neither 'template' nor 'templateID' are set"),
+		},
+		ConfigTestCase{
+			Config: anxtypes.RawConfig{Token: newConfigVarString("TEST-TOKEN"), CPUs: 1, DiskSize: 5, Memory: 5,
+				Template: newConfigVarString("TNAME"), TemplateID: newConfigVarString("TID"),
+				LocationID: newConfigVarString("TLID")},
+			Error: errors.New("both 'template' and 'templateID' are set"),
 		},
 		ConfigTestCase{
 			Config: anxtypes.RawConfig{Token: newConfigVarString("TEST-TOKEN"), CPUs: 1, DiskSize: 5, Memory: 5,

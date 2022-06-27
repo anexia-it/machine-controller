@@ -47,13 +47,15 @@ var StatusUpdateFailed = cloudprovidererrors.TerminalError{
 }
 
 type RawConfig struct {
-	Token      providerconfigtypes.ConfigVarString `json:"token,omitempty"`
-	VlanID     providerconfigtypes.ConfigVarString `json:"vlanID"`
-	LocationID providerconfigtypes.ConfigVarString `json:"locationID"`
-	TemplateID providerconfigtypes.ConfigVarString `json:"templateID"`
-	CPUs       int                                 `json:"cpus"`
-	Memory     int                                 `json:"memory"`
-	DiskSize   int                                 `json:"diskSize"`
+	Token         providerconfigtypes.ConfigVarString `json:"token,omitempty"`
+	VlanID        providerconfigtypes.ConfigVarString `json:"vlanID"`
+	LocationID    providerconfigtypes.ConfigVarString `json:"locationID"`
+	TemplateID    providerconfigtypes.ConfigVarString `json:"templateID"`
+	Template      providerconfigtypes.ConfigVarString `json:"template"`
+	TemplateBuild providerconfigtypes.ConfigVarString `json:"templateBuild"`
+	CPUs          int                                 `json:"cpus"`
+	Memory        int                                 `json:"memory"`
+	DiskSize      int                                 `json:"diskSize"`
 }
 
 type ProviderStatus struct {
@@ -66,13 +68,15 @@ type ProviderStatus struct {
 }
 
 type Config struct {
-	Token      string
-	VlanID     string
-	LocationID string
-	TemplateID string
-	CPUs       int
-	Memory     int
-	DiskSize   int
+	Token         string
+	VlanID        string
+	LocationID    string
+	TemplateID    string
+	Template      string
+	TemplateBuild string
+	CPUs          int
+	Memory        int
+	DiskSize      int
 }
 
 func GetConfig(pconfig providerconfigtypes.Config) (*RawConfig, error) {
