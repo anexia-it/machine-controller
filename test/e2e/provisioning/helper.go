@@ -33,7 +33,6 @@ var (
 	scenarios = buildScenarios()
 
 	versions = []*semver.Version{
-		semver.MustParse("v1.21.10"),
 		semver.MustParse("v1.22.7"),
 		semver.MustParse("v1.23.5"),
 		semver.MustParse("v1.24.0"),
@@ -55,6 +54,14 @@ var (
 		string(providerconfigtypes.OperatingSystemRHEL):       "machine-controller-e2e-rhel-8-5",
 		string(providerconfigtypes.OperatingSystemFlatcar):    "machine-controller-e2e-flatcar-stable-2983",
 		string(providerconfigtypes.OperatingSystemRockyLinux): "machine-controller-e2e-rockylinux",
+	}
+
+	vSphereOSImageTemplates = map[string]string{
+		string(providerconfigtypes.OperatingSystemCentOS):     "machine-controller-e2e-centos",
+		string(providerconfigtypes.OperatingSystemFlatcar):    "machine-controller-e2e-flatcar",
+		string(providerconfigtypes.OperatingSystemRHEL):       "machine-controller-e2e-rhel",
+		string(providerconfigtypes.OperatingSystemRockyLinux): "machine-controller-e2e-rockylinux",
+		string(providerconfigtypes.OperatingSystemUbuntu):     "machine-controller-e2e-ubuntu",
 	}
 )
 
@@ -194,27 +201,30 @@ func testScenario(t *testing.T, testCase scenario, cloudProvider string, testPar
 		scenarioParams = append(scenarioParams, fmt.Sprintf("<< CUSTOM-IMAGE >>=%v", "rhel-8-1-custom"))
 		scenarioParams = append(scenarioParams, fmt.Sprintf("<< AMI >>=%s", "ami-08c04369895785ac4"))
 		scenarioParams = append(scenarioParams, fmt.Sprintf("<< MAX_PRICE >>=%s", "0.08"))
-	} else if testCase.osName == string(providerconfigtypes.OperatingSystemUbuntu) {
-		// TODO: Remove this when https://github.com/kubermatic/kubermatic/issues/10022 is marked as resolved.
-		scenarioParams = append(scenarioParams, fmt.Sprintf("<< OS_DISK_SIZE >>=%v", 30))
-		scenarioParams = append(scenarioParams, fmt.Sprintf("<< DATA_DISK_SIZE >>=%v", 30))
-		scenarioParams = append(scenarioParams, fmt.Sprintf("<< AMI >>=%s", "ami-092f628832a8d22a5")) // ubuntu/images/hvm-ssd/ubuntu-focal-20.04-amd64-server-20220523
-		scenarioParams = append(scenarioParams, fmt.Sprintf("<< DISK_SIZE >>=%v", 25))
-		scenarioParams = append(scenarioParams, fmt.Sprintf("<< CUSTOM-IMAGE >>=%v", ""))
-		scenarioParams = append(scenarioParams, fmt.Sprintf("<< RHEL_SUBSCRIPTION_MANAGER_USER >>=%s", ""))
-		scenarioParams = append(scenarioParams, fmt.Sprintf("<< RHEL_SUBSCRIPTION_MANAGER_PASSWORD >>=%s", ""))
-		scenarioParams = append(scenarioParams, fmt.Sprintf("<< REDHAT_SUBSCRIPTIONS_OFFLINE_TOKEN >>=%s", ""))
-		scenarioParams = append(scenarioParams, fmt.Sprintf("<< MAX_PRICE >>=%s", "0.03"))
 	} else {
 		scenarioParams = append(scenarioParams, fmt.Sprintf("<< OS_DISK_SIZE >>=%v", 30))
 		scenarioParams = append(scenarioParams, fmt.Sprintf("<< DATA_DISK_SIZE >>=%v", 30))
 		scenarioParams = append(scenarioParams, fmt.Sprintf("<< AMI >>=%s", ""))
 		scenarioParams = append(scenarioParams, fmt.Sprintf("<< DISK_SIZE >>=%v", 25))
 		scenarioParams = append(scenarioParams, fmt.Sprintf("<< CUSTOM-IMAGE >>=%v", ""))
-		scenarioParams = append(scenarioParams, fmt.Sprintf("<< RHEL_SUBSCRIPTION_MANAGER_USER >>=%s", ""))
-		scenarioParams = append(scenarioParams, fmt.Sprintf("<< RHEL_SUBSCRIPTION_MANAGER_PASSWORD >>=%s", ""))
-		scenarioParams = append(scenarioParams, fmt.Sprintf("<< REDHAT_SUBSCRIPTIONS_OFFLINE_TOKEN >>=%s", ""))
 		scenarioParams = append(scenarioParams, fmt.Sprintf("<< MAX_PRICE >>=%s", "0.03"))
+	}
+
+	if strings.Contains(cloudProvider, string(providerconfigtypes.CloudProviderEquinixMetal)) {
+		switch testCase.osName {
+		case string(providerconfigtypes.OperatingSystemCentOS):
+			scenarioParams = append(scenarioParams, fmt.Sprintf("<< INSTANCE_TYPE >>=%s", "m3.small.x86"))
+			scenarioParams = append(scenarioParams, fmt.Sprintf("<< METRO_CODE >>=%s", "AM"))
+		case string(providerconfigtypes.OperatingSystemFlatcar):
+			scenarioParams = append(scenarioParams, fmt.Sprintf("<< INSTANCE_TYPE >>=%s", "c3.small.x86"))
+			scenarioParams = append(scenarioParams, fmt.Sprintf("<< METRO_CODE >>=%s", "NY"))
+		case string(providerconfigtypes.OperatingSystemRockyLinux):
+			scenarioParams = append(scenarioParams, fmt.Sprintf("<< INSTANCE_TYPE >>=%s", "m3.small.x86"))
+			scenarioParams = append(scenarioParams, fmt.Sprintf("<< METRO_CODE >>=%s", "AM"))
+		case string(providerconfigtypes.OperatingSystemUbuntu):
+			scenarioParams = append(scenarioParams, fmt.Sprintf("<< INSTANCE_TYPE >>=%s", "m3.small.x86"))
+			scenarioParams = append(scenarioParams, fmt.Sprintf("<< METRO_CODE >>=%s", "TY"))
+		}
 	}
 
 	// only used by assume role scenario, otherwise empty (disabled)
@@ -223,6 +233,9 @@ func testScenario(t *testing.T, testCase scenario, cloudProvider string, testPar
 
 	// only used by OpenStack scenarios
 	scenarioParams = append(scenarioParams, fmt.Sprintf("<< OS_IMAGE >>=%s", openStackImages[testCase.osName]))
+
+	// only use by vSphere scenarios
+	scenarioParams = append(scenarioParams, fmt.Sprintf("<< OS_Image_Template >>=%s", vSphereOSImageTemplates[testCase.osName]))
 
 	// default kubeconfig to the hardcoded path at which `make e2e-cluster` creates its new kubeconfig
 	gopath := os.Getenv("GOPATH")
@@ -270,6 +283,5 @@ func buildScenarios() []scenario {
 		osName:           "ubuntu",
 		executor:         verifyMigrateUID,
 	})
-
 	return all
 }

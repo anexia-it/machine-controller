@@ -1004,6 +1004,17 @@ func (d *awsInstance) ID() string {
 	return aws.StringValue(d.instance.InstanceId)
 }
 
+func (d *awsInstance) ProviderID() string {
+	if d.instance.InstanceId == nil {
+		return ""
+	}
+	if d.instance.Placement.AvailabilityZone == nil {
+		return "aws:///" + *d.instance.InstanceId
+	}
+
+	return "aws:///" + *d.instance.Placement.AvailabilityZone + "/" + *d.instance.InstanceId
+}
+
 func (d *awsInstance) Addresses() map[string]v1.NodeAddressType {
 	addresses := map[string]v1.NodeAddressType{
 		aws.StringValue(d.instance.PublicIpAddress):  v1.NodeExternalIP,
@@ -1126,7 +1137,7 @@ func (p *provider) SetMetricsForMachines(machines clusterv1alpha1.MachineList) e
 	}
 
 	type ec2Credentials struct {
-		acccessKeyID         string
+		accessKeyID          string
 		secretAccessKey      string
 		region               string
 		assumeRoleARN        string
@@ -1144,7 +1155,7 @@ func (p *provider) SetMetricsForMachines(machines clusterv1alpha1.MachineList) e
 
 		// Very simple and very stupid
 		machineEc2Credentials[fmt.Sprintf("%s/%s/%s/%s/%s", config.AccessKeyID, config.SecretAccessKey, config.Region, config.AssumeRoleARN, config.AssumeRoleExternalID)] = ec2Credentials{
-			acccessKeyID:         config.AccessKeyID,
+			accessKeyID:          config.AccessKeyID,
 			secretAccessKey:      config.SecretAccessKey,
 			region:               config.Region,
 			assumeRoleARN:        config.AssumeRoleARN,
@@ -1154,7 +1165,7 @@ func (p *provider) SetMetricsForMachines(machines clusterv1alpha1.MachineList) e
 
 	allReservations := []*ec2.Reservation{}
 	for _, cred := range machineEc2Credentials {
-		ec2Client, err := getEC2client(cred.acccessKeyID, cred.secretAccessKey, cred.region, cred.assumeRoleARN, cred.assumeRoleExternalID)
+		ec2Client, err := getEC2client(cred.accessKeyID, cred.secretAccessKey, cred.region, cred.assumeRoleARN, cred.assumeRoleExternalID)
 		if err != nil {
 			machineErrors = append(machineErrors, fmt.Errorf("failed to get EC2 client: %w", err))
 			continue
@@ -1169,7 +1180,7 @@ func (p *provider) SetMetricsForMachines(machines clusterv1alpha1.MachineList) e
 
 	for _, machine := range machines.Items {
 		metricInstancesForMachines.WithLabelValues(fmt.Sprintf("%s/%s", machine.Namespace, machine.Name)).Set(
-			getIntanceCountForMachine(machine, allReservations))
+			getInstanceCountForMachine(machine, allReservations))
 	}
 
 	if len(machineErrors) > 0 {
@@ -1179,7 +1190,7 @@ func (p *provider) SetMetricsForMachines(machines clusterv1alpha1.MachineList) e
 	return nil
 }
 
-func getIntanceCountForMachine(machine clusterv1alpha1.Machine, reservations []*ec2.Reservation) float64 {
+func getInstanceCountForMachine(machine clusterv1alpha1.Machine, reservations []*ec2.Reservation) float64 {
 	var count float64
 	for _, reservation := range reservations {
 		for _, i := range reservation.Instances {

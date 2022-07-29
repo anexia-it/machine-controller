@@ -120,6 +120,11 @@ func (s Server) ID() string {
 	return s.id
 }
 
+// TODO: Implement once we start supporting vCloud Director CCM.
+func (s Server) ProviderID() string {
+	return ""
+}
+
 func (s Server) Addresses() map[string]corev1.NodeAddressType {
 	return s.addresses
 }
@@ -246,7 +251,7 @@ func (p *provider) create(ctx context.Context, machine *clusterv1alpha1.Machine,
 
 	// 5. Before powering on the VM, configure customization to attach userdata with the VM
 	// update guest properties.
-	err = setUserData(userdata, vm, providerConfig)
+	err = setUserData(userdata, vm, providerConfig.OperatingSystem == providerconfigtypes.OperatingSystemFlatcar)
 	if err != nil {
 		return nil, err
 	}

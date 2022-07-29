@@ -79,6 +79,8 @@ const (
 	nutanixManifest                   = "./testdata/machinedeployment-nutanix.yaml"
 )
 
+const defaultKubernetesVersion = "1.23.5"
+
 var testRunIdentifier = flag.String("identifier", "local", "The unique identifier for this test run")
 
 func TestInvalidObjectsGetRejected(t *testing.T) {
@@ -115,7 +117,7 @@ func TestCustomCAsAreApplied(t *testing.T) {
 	osNetwork := os.Getenv("OS_NETWORK_NAME")
 
 	if osAuthURL == "" || osUsername == "" || osPassword == "" || osDomain == "" || osRegion == "" || osTenant == "" {
-		t.Fatal("unable to run test suite, all of OS_AUTH_URL, OS_USERNAME, OS_PASSOWRD, OS_REGION, and OS_TENANT OS_DOMAIN must be set!")
+		t.Fatal("unable to run test suite, all of OS_AUTH_URL, OS_USERNAME, OS_PASSWORD, OS_REGION, and OS_TENANT OS_DOMAIN must be set!")
 	}
 
 	params := []string{
@@ -309,7 +311,7 @@ func TestOpenstackProvisioningE2E(t *testing.T) {
 	osNetwork := os.Getenv("OS_NETWORK_NAME")
 
 	if osAuthURL == "" || osUsername == "" || osPassword == "" || osDomain == "" || osRegion == "" || osTenant == "" {
-		t.Fatal("unable to run test suite, all of OS_AUTH_URL, OS_USERNAME, OS_PASSOWRD, OS_REGION, and OS_TENANT OS_DOMAIN must be set!")
+		t.Fatal("unable to run test suite, all of OS_AUTH_URL, OS_USERNAME, OS_PASSWORD, OS_REGION, and OS_TENANT OS_DOMAIN must be set!")
 	}
 
 	params := []string{
@@ -322,7 +324,7 @@ func TestOpenstackProvisioningE2E(t *testing.T) {
 		fmt.Sprintf("<< NETWORK_NAME >>=%s", osNetwork),
 	}
 
-	selector := Not(OsSelector("sles", "rhel", "amzn2"))
+	selector := Not(OsSelector("sles", "amzn2"))
 	runScenarios(t, selector, params, OSManifest, fmt.Sprintf("os-%s", *testRunIdentifier))
 }
 
@@ -340,7 +342,7 @@ func TestOpenstackProjectAuthProvisioningE2E(t *testing.T) {
 	osNetwork := os.Getenv("OS_NETWORK_NAME")
 
 	if osAuthURL == "" || osUsername == "" || osPassword == "" || osDomain == "" || osRegion == "" || osProject == "" {
-		t.Fatal("unable to run test suite, all of OS_AUTH_URL, OS_USERNAME, OS_PASSOWRD, OS_REGION, and OS_TENANT OS_DOMAIN must be set!")
+		t.Fatal("unable to run test suite, all of OS_AUTH_URL, OS_USERNAME, OS_PASSWORD, OS_REGION, and OS_TENANT OS_DOMAIN must be set!")
 	}
 
 	params := []string{
@@ -357,7 +359,7 @@ func TestOpenstackProjectAuthProvisioningE2E(t *testing.T) {
 		name:              "MachineDeploy with project auth vars",
 		osName:            "ubuntu",
 		containerRuntime:  "containerd",
-		kubernetesVersion: "1.21.8",
+		kubernetesVersion: defaultKubernetesVersion,
 		executor:          verifyCreateAndDelete,
 	}
 	testScenario(t, scenario, *testRunIdentifier, params, OSManifestProjectAuth, false)
@@ -388,6 +390,12 @@ func TestDigitalOceanProvisioningE2E(t *testing.T) {
 func TestAWSProvisioningE2E(t *testing.T) {
 	t.Parallel()
 
+	provisioningUtility := flatcar.Ignition
+	// `OPERATING_SYSTEM_MANAGER` will be false when legacy machine-controller userdata should be used for E2E tests.
+	if v := os.Getenv("OPERATING_SYSTEM_MANAGER"); v == "false" {
+		provisioningUtility = flatcar.CloudInit
+	}
+
 	// test data
 	awsKeyID := os.Getenv("AWS_E2E_TESTS_KEY_ID")
 	awsSecret := os.Getenv("AWS_E2E_TESTS_SECRET")
@@ -400,8 +408,9 @@ func TestAWSProvisioningE2E(t *testing.T) {
 	// act
 	params := []string{fmt.Sprintf("<< AWS_ACCESS_KEY_ID >>=%s", awsKeyID),
 		fmt.Sprintf("<< AWS_SECRET_ACCESS_KEY >>=%s", awsSecret),
-		fmt.Sprintf("<< PROVISIONING_UTILITY >>=%s", flatcar.CloudInit),
+		fmt.Sprintf("<< PROVISIONING_UTILITY >>=%s", provisioningUtility),
 	}
+
 	runScenarios(t, selector, params, AWSManifest, fmt.Sprintf("aws-%s", *testRunIdentifier))
 }
 
@@ -422,14 +431,14 @@ func TestAWSAssumeRoleProvisioningE2E(t *testing.T) {
 	// act
 	params := []string{fmt.Sprintf("<< AWS_ACCESS_KEY_ID >>=%s", awsKeyID),
 		fmt.Sprintf("<< AWS_SECRET_ACCESS_KEY >>=%s", awsSecret),
-		fmt.Sprintf("<< PROVISIONING_UTILITY >>=%s", flatcar.CloudInit),
+		fmt.Sprintf("<< PROVISIONING_UTILITY >>=%s", flatcar.Ignition),
 	}
 
 	scenario := scenario{
 		name:              "AWS with AssumeRole",
 		osName:            "ubuntu",
 		containerRuntime:  "docker",
-		kubernetesVersion: "1.22.5",
+		kubernetesVersion: defaultKubernetesVersion,
 		executor:          verifyCreateAndDelete,
 	}
 	testScenario(t, scenario, *testRunIdentifier, params, AWSManifest, false)
@@ -450,7 +459,7 @@ func TestAWSSpotInstanceProvisioningE2E(t *testing.T) {
 	// act
 	params := []string{fmt.Sprintf("<< AWS_ACCESS_KEY_ID >>=%s", awsKeyID),
 		fmt.Sprintf("<< AWS_SECRET_ACCESS_KEY >>=%s", awsSecret),
-		fmt.Sprintf("<< PROVISIONING_UTILITY >>=%s", flatcar.CloudInit),
+		fmt.Sprintf("<< PROVISIONING_UTILITY >>=%s", flatcar.Ignition),
 	}
 	runScenarios(t, selector, params, AWSSpotInstanceManifest, fmt.Sprintf("aws-%s", *testRunIdentifier))
 }
@@ -531,14 +540,14 @@ func TestAWSFlatcarContainerdProvisioningE2E(t *testing.T) {
 	params := []string{
 		fmt.Sprintf("<< AWS_ACCESS_KEY_ID >>=%s", awsKeyID),
 		fmt.Sprintf("<< AWS_SECRET_ACCESS_KEY >>=%s", awsSecret),
-		fmt.Sprintf("<< PROVISIONING_UTILITY >>=%s", flatcar.CloudInit),
+		fmt.Sprintf("<< PROVISIONING_UTILITY >>=%s", flatcar.Ignition),
 	}
 
 	scenario := scenario{
 		name:              "flatcar with containerd in AWS",
 		osName:            "flatcar",
 		containerRuntime:  "containerd",
-		kubernetesVersion: "1.22.5",
+		kubernetesVersion: defaultKubernetesVersion,
 		executor:          verifyCreateAndDelete,
 	}
 	testScenario(t, scenario, *testRunIdentifier, params, AWSManifest, false)
@@ -588,7 +597,7 @@ func TestAWSEbsEncryptionEnabledProvisioningE2E(t *testing.T) {
 		name:              "AWS with ebs encryption enabled",
 		osName:            "ubuntu",
 		containerRuntime:  "containerd",
-		kubernetesVersion: "v1.21.8",
+		kubernetesVersion: defaultKubernetesVersion,
 		executor:          verifyCreateAndDelete,
 	}
 	testScenario(t, scenario, fmt.Sprintf("aws-%s", *testRunIdentifier), params, AWSEBSEncryptedManifest, false)
@@ -608,7 +617,7 @@ func TestAzureProvisioningE2E(t *testing.T) {
 		t.Fatal("unable to run the test suite, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID, AZURE_CLIENT_ID and AZURE_CLIENT_SECRET environment variables cannot be empty")
 	}
 
-	selector := Not(OsSelector("sles", "amzn2"))
+	selector := Not(OsSelector("sles", "amzn2", "rhel", "rockylinux", "flatcar"))
 	// act
 	params := []string{
 		fmt.Sprintf("<< AZURE_TENANT_ID >>=%s", azureTenantID),
@@ -677,7 +686,7 @@ func TestAzureRedhatSatelliteProvisioningE2E(t *testing.T) {
 		name:              "Azure redhat satellite server subscription",
 		osName:            "rhel",
 		containerRuntime:  "docker",
-		kubernetesVersion: "1.21.8",
+		kubernetesVersion: defaultKubernetesVersion,
 		executor:          verifyCreateAndDelete,
 	}
 
@@ -738,7 +747,7 @@ func TestEquinixMetalProvisioningE2E(t *testing.T) {
 		t.Fatal("unable to run the test suite, METAL_PROJECT_ID environment variable cannot be empty")
 	}
 
-	selector := Not(OsSelector("sles", "rhel", "amzn2", "rockylinux"))
+	selector := And(OsSelector("ubuntu", "centos", "rockylinux", "flatcar"), Not(NameSelector("migrateUID")))
 
 	// act
 	params := []string{
@@ -877,7 +886,7 @@ func TestVsphereResourcePoolProvisioningE2E(t *testing.T) {
 		name:              "vSphere resource pool provisioning",
 		osName:            "flatcar",
 		containerRuntime:  "docker",
-		kubernetesVersion: "1.22.5",
+		kubernetesVersion: defaultKubernetesVersion,
 		executor:          verifyCreateAndDelete,
 	}
 
@@ -976,7 +985,7 @@ func TestUbuntuProvisioningWithUpgradeE2E(t *testing.T) {
 	osNetwork := os.Getenv("OS_NETWORK_NAME")
 
 	if osAuthURL == "" || osUsername == "" || osPassword == "" || osDomain == "" || osRegion == "" || osTenant == "" {
-		t.Fatal("unable to run test suite, all of OS_AUTH_URL, OS_USERNAME, OS_PASSOWRD, OS_REGION, and OS_TENANT OS_DOMAIN must be set!")
+		t.Fatal("unable to run test suite, all of OS_AUTH_URL, OS_USERNAME, OS_PASSWORD, OS_REGION, and OS_TENANT OS_DOMAIN must be set!")
 	}
 
 	params := []string{
@@ -993,7 +1002,7 @@ func TestUbuntuProvisioningWithUpgradeE2E(t *testing.T) {
 		name:              "Ubuntu upgrade",
 		osName:            "ubuntu",
 		containerRuntime:  "docker",
-		kubernetesVersion: "1.22.5",
+		kubernetesVersion: defaultKubernetesVersion,
 		executor:          verifyCreateAndDelete,
 	}
 
@@ -1018,7 +1027,7 @@ func TestDeploymentControllerUpgradesMachineE2E(t *testing.T) {
 		name:              "MachineDeployment upgrade",
 		osName:            "ubuntu",
 		containerRuntime:  "docker",
-		kubernetesVersion: "1.21.8",
+		kubernetesVersion: defaultKubernetesVersion,
 		executor:          verifyCreateUpdateAndDelete,
 	}
 	testScenario(t, scenario, *testRunIdentifier, params, HZManifest, false)
@@ -1028,13 +1037,20 @@ func TestAnexiaProvisioningE2E(t *testing.T) {
 	t.Parallel()
 
 	token := os.Getenv("ANEXIA_TOKEN")
-	if token == "" {
-		t.Fatal("unable to run the test suite, ANEXIA_TOKEN environment variable cannot be empty")
+	vlanID := os.Getenv("ANEXIA_VLAN_ID")
+	templateID := os.Getenv("ANEXIA_TEMPLATE_ID")
+	locationID := os.Getenv("ANEXIA_LOCATION_ID")
+
+	if token == "" || vlanID == "" || templateID == "" || locationID == "" {
+		t.Fatal("unable to run test suite, all of ANEXIA_TOKEN, ANEXIA_VLAN_ID, ANEXIA_TEMPLATE_ID, and ANEXIA_LOCATION_ID must be set!")
 	}
 
 	selector := OsSelector("flatcar")
 	params := []string{
 		fmt.Sprintf("<< ANEXIA_TOKEN >>=%s", token),
+		fmt.Sprintf("<< ANEXIA_VLAN_ID >>=%s", vlanID),
+		fmt.Sprintf("<< ANEXIA_TEMPLATE_ID >>=%s", templateID),
+		fmt.Sprintf("<< ANEXIA_LOCATION_ID >>=%s", locationID),
 	}
 
 	runScenarios(t, selector, params, anexiaManifest, fmt.Sprintf("anexia-%s", *testRunIdentifier))

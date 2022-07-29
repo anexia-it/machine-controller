@@ -47,6 +47,8 @@ import (
 	userdatamanager "github.com/kubermatic/machine-controller/pkg/userdata/manager"
 	userdataplugin "github.com/kubermatic/machine-controller/pkg/userdata/plugin"
 	"github.com/kubermatic/machine-controller/pkg/userdata/rhel"
+	"k8c.io/operating-system-manager/pkg/controllers/osc"
+	osmresources "k8c.io/operating-system-manager/pkg/controllers/osc/resources"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -95,7 +97,7 @@ const (
 	// cluster-api provider to match Nodes to Machines.
 	AnnotationAutoscalerIdentifier = "cluster.k8s.io/machine"
 
-	provisioningSuffix = "osc-provisioning"
+	CloudInitNotReadyError = "cloud-init configuration to %s machine: %v is not ready yet"
 )
 
 // Reconciler is the controller implementation for machine resources.
@@ -744,9 +746,14 @@ func (r *Reconciler) ensureInstanceExistsForMachine(
 		if errors.Is(err, cloudprovidererrors.ErrInstanceNotFound) {
 			klog.V(3).Infof("Validated machine spec of %s", machine.Name)
 
-			kubeconfig, err := r.createBootstrapKubeconfig(ctx, machine.Name)
-			if err != nil {
-				return nil, fmt.Errorf("failed to create bootstrap kubeconfig: %w", err)
+			var kubeconfig *clientcmdapi.Config
+
+			// OSM will take care of the bootstrap kubeconfig and token by itself.
+			if !r.useOSM {
+				kubeconfig, err = r.createBootstrapKubeconfig(ctx, machine.Name)
+				if err != nil {
+					return nil, fmt.Errorf("failed to create bootstrap kubeconfig: %w", err)
+				}
 			}
 
 			cloudConfig, kubeletCloudProviderName, err := prov.GetCloudConfig(machine.Spec)
@@ -808,33 +815,51 @@ func (r *Reconciler) ensureInstanceExistsForMachine(
 			var userdata string
 
 			if r.useOSM {
-				referencedMachineDeployment, err := controllerutil.GetMachineDeploymentNameForMachine(ctx, machine, r.client)
+				referencedMachineDeployment, machineDeploymentRevision, err := controllerutil.GetMachineDeploymentNameAndRevisionForMachine(ctx, machine, r.client)
 				if err != nil {
 					return nil, fmt.Errorf("failed to find machine's MachineDployment: %w", err)
 				}
 
-				cloudConfigSecretName := fmt.Sprintf("%s-%s-%s",
+				// We need to ensure that both provisoning and bootstrapping secrets have been created. And that the revision
+				// matches with the machine deployment revision
+				provisioningSecretName := fmt.Sprintf(osmresources.CloudConfigSecretNamePattern,
 					referencedMachineDeployment,
 					machine.Namespace,
-					provisioningSuffix)
+					osmresources.ProvisioningCloudConfig)
 
-				// It is important to check if the secret holding cloud-config exists
+				// Ensure that the provisioning secret exists
+				provisioningSecret := &corev1.Secret{}
 				if err := r.client.Get(ctx,
-					types.NamespacedName{Name: cloudConfigSecretName, Namespace: util.CloudInitNamespace},
-					&corev1.Secret{}); err != nil {
-					klog.Errorf("Cloud init configurations for machine: %v is not ready yet", machine.Name)
+					types.NamespacedName{Name: provisioningSecretName, Namespace: util.CloudInitNamespace},
+					provisioningSecret); err != nil {
+					klog.Errorf(CloudInitNotReadyError, osmresources.ProvisioningCloudConfig, machine.Name)
 					return nil, err
 				}
 
-				userdata, err = getOSMBootstrapUserdata(ctx, r.client, req, cloudConfigSecretName)
-				if err != nil {
-					return nil, fmt.Errorf("failed get OSM userdata: %w", err)
+				provisioningSecretRevision := provisioningSecret.Annotations[osc.MachineDeploymentRevision]
+				if provisioningSecretRevision != machineDeploymentRevision {
+					return nil, fmt.Errorf(CloudInitNotReadyError, osmresources.ProvisioningCloudConfig, machine.Name)
 				}
 
-				userdata, err = cleanupTemplateOutput(userdata)
-				if err != nil {
-					return nil, fmt.Errorf("failed to cleanup user-data template: %w", err)
+				bootstrapSecretName := fmt.Sprintf(osmresources.CloudConfigSecretNamePattern,
+					referencedMachineDeployment,
+					machine.Namespace,
+					osmresources.BootstrapCloudConfig)
+
+				bootstrapSecret := &corev1.Secret{}
+				if err := r.client.Get(ctx,
+					types.NamespacedName{Name: bootstrapSecretName, Namespace: util.CloudInitNamespace},
+					bootstrapSecret); err != nil {
+					klog.Errorf(CloudInitNotReadyError, osmresources.BootstrapCloudConfig, machine.Name)
+					return nil, err
 				}
+
+				bootstrapSecretRevision := bootstrapSecret.Annotations[osc.MachineDeploymentRevision]
+				if bootstrapSecretRevision != machineDeploymentRevision {
+					return nil, fmt.Errorf(CloudInitNotReadyError, osmresources.BootstrapCloudConfig, machine.Name)
+				}
+
+				userdata = getOSMBootstrapUserdata(req.MachineSpec.Name, *bootstrapSecret)
 			} else {
 				userdata, err = userdataPlugin.UserData(req)
 				if err != nil {
@@ -878,6 +903,23 @@ func (r *Reconciler) ensureInstanceExistsForMachine(
 	addresses := providerInstance.Addresses()
 	eventMessage := fmt.Sprintf("Found instance at cloud provider, addresses: %v", addresses)
 	r.recorder.Event(machine, corev1.EventTypeNormal, "InstanceFound", eventMessage)
+	// It might happen that we got here, but we still don't have IP addresses
+	// for the instance. In that case it doesn't make sense to proceed because:
+	//   * if we match Node by ProviderID, Machine will get NodeOwnerRef, but
+	//     there will be no IP address on that Machine object. Since we
+	//     successfully set NodeOwnerRef, Machine will not be reconciled again,
+	//     so it will never get IP addresses. This breaks the NodeCSRApprover
+	//     workflow because NodeCSRApprover cannot validate certificates without
+	//     IP addresses, resulting in a broken Node
+	//   * if we can't match Node by ProviderID, fallback to matching by IP
+	//     address will not have any result because we still don't have IP
+	//     addresses for that instance
+	// Considering that, we just retry after 15 seconds, hoping that we'll
+	// get IP addresses by then.
+	if len(addresses) == 0 {
+		return &reconcile.Result{RequeueAfter: 15 * time.Second}, nil
+	}
+
 	machineAddresses := []corev1.NodeAddress{}
 	for address, addressType := range addresses {
 		machineAddresses = append(machineAddresses, corev1.NodeAddress{Address: address, Type: addressType})
@@ -1040,19 +1082,13 @@ func (r *Reconciler) getNode(ctx context.Context, instance instance.Instance, pr
 		return nil, false, err
 	}
 
-	// We trim leading slashes in raw ID, since we always want three slashes in full ID
-	providerID := fmt.Sprintf("%s:///%s", provider, strings.TrimLeft(instance.ID(), "/"))
 	for _, node := range nodes.Items {
-		if provider == providerconfigtypes.CloudProviderAzure {
-			// Azure IDs are case-insensitive
-			if strings.EqualFold(node.Spec.ProviderID, providerID) {
-				return node.DeepCopy(), true, nil
-			}
-		} else {
-			if node.Spec.ProviderID == providerID {
-				return node.DeepCopy(), true, nil
-			}
+		// Try to find Node by providerID. Should work if CCM is deployed.
+		if node := findNodeByProviderID(instance, provider, nodes.Items); node != nil {
+			klog.V(4).Infof("Found node %q by providerID", node.Name)
+			return node, true, nil
 		}
+
 		// If we were unable to find Node by ProviderID, fallback to IP address matching.
 		// This usually happens if there's no CCM deployed in the cluster.
 		//
@@ -1079,12 +1115,39 @@ func (r *Reconciler) getNode(ctx context.Context, instance instance.Instance, pr
 					continue
 				}
 				if nodeAddress.Address == instanceAddress {
+					klog.V(4).Infof("Found node %q by IP address", node.Name)
 					return node.DeepCopy(), true, nil
 				}
 			}
 		}
 	}
 	return nil, false, nil
+}
+
+func findNodeByProviderID(instance instance.Instance, provider providerconfigtypes.CloudProvider, nodes []corev1.Node) *corev1.Node {
+	providerID := instance.ProviderID()
+	if providerID == "" {
+		return nil
+	}
+
+	for _, node := range nodes {
+		if strings.EqualFold(node.Spec.ProviderID, providerID) {
+			return node.DeepCopy()
+		}
+
+		// AWS has two different providerID notations:
+		//   * aws:///<availability-zone>/<instance-id>
+		//   * aws:///<instance-id>
+		// The first case is handled above, while the second here is handled here.
+		if provider == providerconfigtypes.CloudProviderAWS {
+			pid := strings.Split(node.Spec.ProviderID, "aws:///")
+			if len(pid) == 2 && pid[1] == instance.ID() {
+				return node.DeepCopy()
+			}
+		}
+	}
+
+	return nil
 }
 
 func (r *Reconciler) ReadinessChecks(ctx context.Context) map[string]healthcheck.Check {

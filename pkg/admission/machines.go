@@ -27,6 +27,7 @@ import (
 	"github.com/kubermatic/machine-controller/pkg/apis/cluster/common"
 	clusterv1alpha1 "github.com/kubermatic/machine-controller/pkg/apis/cluster/v1alpha1"
 	"github.com/kubermatic/machine-controller/pkg/cloudprovider"
+	controllerutil "github.com/kubermatic/machine-controller/pkg/controller/util"
 	"github.com/kubermatic/machine-controller/pkg/providerconfig"
 	providerconfigtypes "github.com/kubermatic/machine-controller/pkg/providerconfig/types"
 
@@ -97,6 +98,14 @@ func (ad *admissionData) mutateMachines(ctx context.Context, ar admissionv1.Admi
 		common.SetOSLabel(&machine.Spec, string(providerConfig.OperatingSystem))
 	}
 
+	// Set LegacyMachineControllerUserDataLabel to false if OSM was used for managing the machine configuration.
+	if ad.useOSM {
+		if machine.Labels == nil {
+			machine.Labels = make(map[string]string)
+		}
+		machine.Labels[controllerutil.LegacyMachineControllerUserDataLabel] = "false"
+	}
+
 	return createAdmissionResponse(machineOriginal, &machine)
 }
 
@@ -160,6 +169,7 @@ func (ad *admissionData) defaultAndValidateMachineSpec(ctx context.Context, spec
 		providerConfig.OperatingSystem,
 		providerConfig.CloudProvider,
 		providerConfig.OperatingSystemSpec,
+		ad.useOSM,
 	)
 	if err != nil {
 		return err

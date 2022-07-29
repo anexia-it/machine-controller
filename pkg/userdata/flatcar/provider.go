@@ -120,7 +120,7 @@ func (p Provider) UserData(req plugin.UserDataRequest) (string, error) {
 		KubeletVersion:                     kubeletVersion.String(),
 		Kubeconfig:                         kubeconfigString,
 		KubernetesCACert:                   kubernetesCACert,
-		NodeIPScript:                       userdatahelper.SetupNodeIPEnvScript(),
+		NodeIPScript:                       userdatahelper.SetupNodeIPEnvScript(pconfig.Network.GetIPFamily()),
 		ExtraKubeletFlags:                  crEngine.KubeletFlags(),
 		ContainerRuntimeScript:             crScript,
 		ContainerRuntimeConfigFileName:     crEngine.ConfigFileName(),
@@ -295,13 +295,17 @@ systemd:
         contents: |
           [Service]
           EnvironmentFile=/etc/kubernetes/nodeip.conf
+      - name: resolv.conf
+        contents: |
+          [Service]
+          Environment="KUBELET_EXTRA_ARGS=--resolv-conf=/run/systemd/resolve/resolv.conf"
       - name: 40-download.conf
         contents: |
           [Unit]
           Requires=download-script.service
           After=download-script.service
       contents: |
-{{ kubeletSystemdUnit .ContainerRuntimeName .KubeletVersion .KubeletCloudProviderName .MachineSpec.Name .DNSIPs .ExternalCloudProvider .PauseImage .MachineSpec.Taints .ExtraKubeletFlags false | indent 8 }}
+{{ kubeletSystemdUnit .ContainerRuntimeName .KubeletVersion .KubeletCloudProviderName .MachineSpec.Name .DNSIPs .ExternalCloudProvider .ProviderSpec.Network.GetIPFamily .PauseImage .MachineSpec.Taints .ExtraKubeletFlags false | indent 8 }}
 
 storage:
   files:
@@ -617,13 +621,17 @@ coreos:
       content: |
         [Service]
         EnvironmentFile=/etc/kubernetes/nodeip.conf
+    - name: resolv.conf
+      content: |
+        [Service]
+        Environment="KUBELET_EXTRA_ARGS=--resolv-conf=/run/systemd/resolve/resolv.conf"
     - name: 40-download.conf
       content: |
         [Unit]
         Requires=download-script.service
         After=download-script.service
     content: |
-{{ kubeletSystemdUnit .ContainerRuntimeName .KubeletVersion .KubeletCloudProviderName .MachineSpec.Name .DNSIPs .ExternalCloudProvider .PauseImage .MachineSpec.Taints .ExtraKubeletFlags false | indent 6 }}
+{{ kubeletSystemdUnit .ContainerRuntimeName .KubeletVersion .KubeletCloudProviderName .MachineSpec.Name .DNSIPs .ExternalCloudProvider .ProviderSpec.Network.GetIPFamily .PauseImage .MachineSpec.Taints .ExtraKubeletFlags false | indent 6 }}
 
   - name: apply-sysctl-settings.service
     enable: true

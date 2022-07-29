@@ -161,6 +161,10 @@ func (k *kubeVirtServer) ID() string {
 	return string(k.vmi.UID)
 }
 
+func (k *kubeVirtServer) ProviderID() string {
+	return "kubevirt://" + k.vmi.Name
+}
+
 func (k *kubeVirtServer) Addresses() map[string]corev1.NodeAddressType {
 	addresses := map[string]corev1.NodeAddressType{}
 	for _, kvInterface := range k.vmi.Status.Interfaces {
@@ -491,7 +495,7 @@ func (p *provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine,
 	resourceRequirements := kubevirtv1.ResourceRequirements{}
 	labels := map[string]string{"kubevirt.io/vm": machine.Name}
 	// Add a common label to all VirtualMachines spawned by the same MachineDeployment (= MachineDeployment name).
-	if mdName, err := controllerutil.GetMachineDeploymentNameForMachine(ctx, machine, data.Client); err == nil {
+	if mdName, _, err := controllerutil.GetMachineDeploymentNameAndRevisionForMachine(ctx, machine, data.Client); err == nil {
 		labels[machineDeploymentLabelKey] = mdName
 	}
 

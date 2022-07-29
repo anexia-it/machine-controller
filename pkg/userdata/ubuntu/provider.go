@@ -66,11 +66,6 @@ func (p Provider) UserData(req plugin.UserDataRequest) (string, error) {
 		return "", fmt.Errorf("failed to get ubuntu config from provider config: %w", err)
 	}
 
-	serverAddr, err := userdatahelper.GetServerAddressFromKubeconfig(req.Kubeconfig)
-	if err != nil {
-		return "", fmt.Errorf("error extracting server address from kubeconfig: %w", err)
-	}
-
 	kubeconfigString, err := userdatahelper.StringifyKubeconfig(req.Kubeconfig)
 	if err != nil {
 		return "", err
@@ -101,7 +96,6 @@ func (p Provider) UserData(req plugin.UserDataRequest) (string, error) {
 		plugin.UserDataRequest
 		ProviderSpec                       *providerconfigtypes.Config
 		OSConfig                           *Config
-		ServerAddr                         string
 		KubeletVersion                     string
 		Kubeconfig                         string
 		KubernetesCACert                   string
@@ -117,11 +111,10 @@ func (p Provider) UserData(req plugin.UserDataRequest) (string, error) {
 		UserDataRequest:                    req,
 		ProviderSpec:                       pconfig,
 		OSConfig:                           ubuntuConfig,
-		ServerAddr:                         serverAddr,
 		KubeletVersion:                     kubeletVersion.String(),
 		Kubeconfig:                         kubeconfigString,
 		KubernetesCACert:                   kubernetesCACert,
-		NodeIPScript:                       userdatahelper.SetupNodeIPEnvScript(),
+		NodeIPScript:                       userdatahelper.SetupNodeIPEnvScript(pconfig.Network.GetIPFamily()),
 		ExtraKubeletFlags:                  crEngine.KubeletFlags(),
 		ContainerRuntimeScript:             crScript,
 		ContainerRuntimeConfigFileName:     crEngine.ConfigFileName(),
@@ -270,7 +263,7 @@ write_files:
 
 - path: "/etc/systemd/system/kubelet.service"
   content: |
-{{ kubeletSystemdUnit .ContainerRuntimeName .KubeletVersion .KubeletCloudProviderName .MachineSpec.Name .DNSIPs .ExternalCloudProvider .PauseImage .MachineSpec.Taints .ExtraKubeletFlags true | indent 4 }}
+{{ kubeletSystemdUnit .ContainerRuntimeName .KubeletVersion .KubeletCloudProviderName .MachineSpec.Name .DNSIPs .ExternalCloudProvider .ProviderSpec.Network.GetIPFamily .PauseImage .MachineSpec.Taints .ExtraKubeletFlags true | indent 4 }}
 
 - path: "/etc/systemd/system/kubelet.service.d/extras.conf"
   content: |
