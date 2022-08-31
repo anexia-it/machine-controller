@@ -19,7 +19,7 @@ package anexia
 import (
 	"net"
 
-	"github.com/anexia-it/go-anxcloud/pkg/vsphere/info"
+	"go.anx.io/go-anxcloud/pkg/vsphere/info"
 
 	"github.com/kubermatic/machine-controller/pkg/cloudprovider/instance"
 	anxtypes "github.com/kubermatic/machine-controller/pkg/cloudprovider/provider/anexia/types"

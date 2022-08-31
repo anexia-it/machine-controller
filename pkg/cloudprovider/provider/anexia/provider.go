@@ -80,12 +80,10 @@ type resolvedDisk struct {
 type resolvedConfig struct {
 	anxtypes.RawConfig
 
-	Token         string
-	VlanID        string
-	LocationID    string
-	TemplateID    string
-	Template      string
-	TemplateBuild string
+	Token      string
+	VlanID     string
+	LocationID string
+	TemplateID string
 
 	Disks []resolvedDisk
 }
@@ -110,7 +108,7 @@ func (p *provider) Create(machine *clusterv1alpha1.Machine, data *cloudprovidert
 		Machine:      machine,
 	})
 
-	a, client, err := getClient(config.Token)
+	_, client, err := getClient(config.Token)
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +130,7 @@ func (p *provider) Create(machine *clusterv1alpha1.Machine, data *cloudprovidert
 	}
 
 	// provision machine
-	err = provisionVM(ctx, a, client)
+	err = provisionVM(ctx, client)
 	if err != nil {
 		return nil, err
 	}
@@ -166,7 +164,7 @@ func waitForVM(ctx context.Context, client anxclient.Client) error {
 	return updateMachineStatus(reconcileContext.Machine, *reconcileContext.Status, reconcileContext.ProviderData.Update)
 }
 
-func provisionVM(ctx context.Context, a api.API, client anxclient.Client) error {
+func provisionVM(ctx context.Context, client anxclient.Client) error {
 	reconcileContext := getReconcileContext(ctx)
 	vmAPI := vsphere.NewAPI(client)
 
@@ -189,15 +187,10 @@ func provisionVM(ctx context.Context, a api.API, client anxclient.Client) error 
 			VLAN:    config.VlanID,
 		}}
 
-		templateID, err := getTemplateID(ctx, a)
-		if err != nil {
-			return newError(common.CreateMachineError, "failed to resolve template ID from config: %s", err)
-		}
-
 		vm := vmAPI.Provisioning().VM().NewDefinition(
 			config.LocationID,
 			"templates",
-			templateID,
+			config.TemplateID,
 			reconcileContext.Machine.Name,
 			config.CPUs,
 			config.Memory,
@@ -291,22 +284,6 @@ func getIPAddress(ctx context.Context, client anxclient.Client) (string, error) 
 	return ip, nil
 }
 
-func getTemplateID(ctx context.Context, a api.API) (string, error) {
-	config := getReconcileContext(ctx).Config
-
-	if config.TemplateID != "" {
-		return config.TemplateID, nil
-	}
-
-	// when "templateID" is not set, we expect "template" to be; which is already checked by provider.Validate
-	tpl, err := vspherev1.FindNamedTemplate(ctx, a, config.Template, config.TemplateBuild, corev1.Location{Identifier: config.LocationID})
-	if err != nil {
-		return "", fmt.Errorf("failed to retrieve named template: %s", err)
-	}
-
-	return tpl.Identifier, nil
-}
-
 func isAlreadyProvisioning(ctx context.Context) bool {
 	status := getReconcileContext(ctx).Status
 	condition := meta.FindStatusCondition(status.Conditions, ProvisionedType)
@@ -335,6 +312,25 @@ func ensureConditions(status *anxtypes.ProviderStatus) {
 	}
 }
 
+func resolveTemplateID(ctx context.Context, a api.API, config anxtypes.RawConfig, configVarResolver *providerconfig.ConfigVarResolver, locationID string) (string, error) {
+	templateName, err := configVarResolver.GetConfigVarStringValue(config.Template)
+	if err != nil {
+		return "", fmt.Errorf("failed to get 'template': %w", err)
+	}
+
+	templateBuild, err := configVarResolver.GetConfigVarStringValue(config.TemplateBuild)
+	if err != nil {
+		return "", fmt.Errorf("failed to get 'templateBuild': %w", err)
+	}
+
+	template, err := vspherev1.FindNamedTemplate(ctx, a, templateName, templateBuild, corev1.Location{Identifier: locationID})
+	if err != nil {
+		return "", fmt.Errorf("failed to retrieve named template: %w", err)
+	}
+
+	return template.Identifier, nil
+}
+
 func (p *provider) resolveConfig(config anxtypes.RawConfig) (*resolvedConfig, error) {
 	var err error
 	ret := resolvedConfig{
@@ -356,14 +352,19 @@ func (p *provider) resolveConfig(config anxtypes.RawConfig) (*resolvedConfig, er
 		return nil, fmt.Errorf("failed to get 'templateID': %w", err)
 	}
 
-	ret.Template, err = p.configVarResolver.GetConfigVarStringValue(config.Template)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get 'template': %w", err)
-	}
+	// when "templateID" is not set, we expect "template" to be
+	if ret.TemplateID == "" {
+		a, _, err := getClient(ret.Token)
+		if err != nil {
+			return nil, fmt.Errorf("failed initializing API clients: %w", err)
+		}
 
-	ret.TemplateBuild, err = p.configVarResolver.GetConfigVarStringValue(config.TemplateBuild)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get 'templateBuild': %w", err)
+		templateID, err := resolveTemplateID(context.TODO(), a, config, p.configVarResolver, ret.LocationID)
+		if err != nil {
+			return nil, fmt.Errorf("failed retrieving template id from named template: %w", err)
+		}
+
+		ret.TemplateID = templateID
 	}
 
 	ret.VlanID, err = p.configVarResolver.GetConfigVarStringValue(config.VlanID)
@@ -444,7 +445,7 @@ func (p *provider) Validate(machinespec clusterv1alpha1.MachineSpec) error {
 	}
 
 	if config.Token == "" {
-		return errors.New("token is missing")
+		return errors.New("token not set")
 	}
 
 	if config.CPUs == 0 {
@@ -473,12 +474,8 @@ func (p *provider) Validate(machinespec clusterv1alpha1.MachineSpec) error {
 		return errors.New("location id is missing")
 	}
 
-	if config.TemplateID == "" && config.Template == "" {
-		return errors.New("neither 'template' nor 'templateID' are set")
-	}
-
-	if config.TemplateID != "" && config.Template != "" {
-		return errors.New("both 'template' and 'templateID' are set")
+	if config.TemplateID == "" {
+		return errors.New("no valid template configured")
 	}
 
 	if config.VlanID == "" {
