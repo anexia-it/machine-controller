@@ -107,6 +107,28 @@ data:
 
 ## Development
 
+### Docker
+
+1. Copy the `kubeconfig.yml` file of your cluster into the working directory
+    ```
+    cp </path/to/your/kubeconfig.yml> .kubeconfig
+    ```
+
+1. Create a `.env` file
+    ```
+    touch .env
+    ```
+
+1. Add needed environmnet variables to the `.env` file e.g.:
+    ```
+    API_TOKEN_FOR_CLOUD_PROVIDER=super-secret-api-key
+    ```
+
+1. Start the development container with `docker-compose`
+    ```
+    docker-compose up
+    ```
+
 ### Testing
 
 #### Unittests
