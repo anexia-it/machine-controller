@@ -28,3 +28,22 @@ COPY --from=builder \
     /go/src/github.com/kubermatic/machine-controller/webhook \
     /usr/local/bin/
 USER nobody
+
+FROM docker.io/golang:${GO_VERSION} AS dev
+
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+WORKDIR /src
+
+COPY go.mod ./
+COPY go.sum ./
+RUN go mod download
+
+ENV GOCACHE=/src/.buildcache
+
+VOLUME [ "/src" ]
+
+ENTRYPOINT [ "/entrypoint.sh" ]
+
+CMD [ "/usr/local/go/bin/go", "run", "./cmd/machine-controller/main.go", "-kubeconfig=.kubeconfig", "-logtostderr", "-v=6", "-metrics-address=0.0.0.0:8080", "-health-probe-address=0.0.0.0:8085", "-node-csr-approver", "-node-container-runtime=containerd" ]
