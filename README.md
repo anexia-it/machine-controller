@@ -119,7 +119,7 @@ data:
     touch .env
     ```
 
-1. Add needed environmnet variables to the `.env` file e.g.:
+1. Add needed environment variables to the `.env` file e.g.:
     ```
     API_TOKEN_FOR_CLOUD_PROVIDER=super-secret-api-key
     ```
