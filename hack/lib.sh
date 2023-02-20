@@ -45,9 +45,14 @@ appendTrap() {
   fi
 }
 
+is_containerized() {
+  # we're inside a Kubernetes pod/container or inside a container launched by containerize()
+  [ -n "${KUBERNETES_SERVICE_HOST:-}" ] || [ -n "${CONTAINERIZED:-}" ]
+}
+
 containerize() {
   local cmd="$1"
-  local image="${CONTAINERIZE_IMAGE:-quay.io/kubermatic/util:2.0.0}"
+  local image="${CONTAINERIZE_IMAGE:-quay.io/kubermatic/util:2.2.0}"
   local gocache="${CONTAINERIZE_GOCACHE:-/tmp/.gocache}"
   local gomodcache="${CONTAINERIZE_GOMODCACHE:-/tmp/.gomodcache}"
   local skip="${NO_CONTAINERIZE:-}"
@@ -55,7 +60,7 @@ containerize() {
   # short-circuit containerize when in some cases it needs to be avoided
   [ -n "$skip" ] && return
 
-  if ! [ -f /.dockerenv ]; then
+  if ! is_containerized; then
     echodate "Running $cmd in a Docker container using $image..."
     mkdir -p "$gocache"
     mkdir -p "$gomodcache"
@@ -67,6 +72,7 @@ containerize() {
       -w /go/src/k8c.io/kubermatic \
       -e "GOCACHE=$gocache" \
       -e "GOMODCACHE=$gomodcache" \
+      -e "CONTAINERIZED=true" \
       -u "$(id -u):$(id -g)" \
       --entrypoint="$cmd" \
       --rm \
@@ -233,5 +239,49 @@ check_all_deployments_ready() {
     return 1
   fi
 
+  return 0
+}
+
+pr_has_label() {
+  if [ -z "${REPO_OWNER:-}" ] || [ -z "${REPO_NAME:-}" ] || [ -z "${PULL_NUMBER:-}" ]; then
+    echo "PR check only works on CI."
+    return 1
+  fi
+
+  matched=$(curl \
+    --header "Accept: application/vnd.github+json" \
+    --silent \
+    --fail \
+    https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/pulls/$PULL_NUMBER |
+    jq --arg labelName "$1" '.labels[] | select(.name == $labelName)')
+
+  [ -n "$matched" ]
+}
+
+provider_disabled() {
+  # e.g. "VSPHERE_E2E_DISABLED"
+  local disableEnv="${1^^}_E2E_DISABLED"
+  local labelName="test/require-$1"
+
+  # tests can be globally disabled by having a special environment
+  # variable injected via the Prow preset; if they are not disabled,
+  # we are done here.
+  if [ -z "${!disableEnv:-}" ]; then
+    return 1
+  fi
+
+  # Even if tests are disabled, they can be forcefully re-enabled
+  # (e.g. if provider X is disabled for all tests until a certain
+  # pull requests fixes some underlying issue and for that certain
+  # PR we want to run the tests regardless).
+  # Importantly, one cannot use labels to _disable_ any tests, only
+  # _re-enable_ them.
+
+  if pr_has_label "$labelName"; then
+    echodate "\$$disableEnv is set, but PR has $labelName label, so tests will not be disabled."
+    return 1
+  fi
+
+  echodate "\$$disableEnv is set, tests will be disabled. Apply the label $labelName to this PR to forcefully enable the tests."
   return 0
 }

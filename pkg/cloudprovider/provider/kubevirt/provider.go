@@ -58,7 +58,12 @@ func init() {
 	if err := kubevirtv1.AddToScheme(scheme.Scheme); err != nil {
 		klog.Fatalf("failed to add kubevirtv1 to scheme: %v", err)
 	}
+	if err := cdiv1beta1.AddToScheme(scheme.Scheme); err != nil {
+		klog.Fatalf("failed to add cdiv1beta1 to scheme: %v", err)
+	}
 }
+
+type imageSource string
 
 const (
 	// topologyKeyHostname defines the topology key for the node hostname.
@@ -66,15 +71,11 @@ const (
 	// machineDeploymentLabelKey defines the label key used to contains as value the MachineDeployment name
 	// which machine comes from.
 	machineDeploymentLabelKey = "md"
+	// httpSource defines the http source type for VM Disk Image.
+	httpSource imageSource = "http"
+	// pvcSource defines the pvc source type for VM Disk Image.
+	pvcSource imageSource = "pvc"
 )
-
-var supportedOS = map[providerconfigtypes.OperatingSystem]*struct{}{
-	providerconfigtypes.OperatingSystemCentOS:     nil,
-	providerconfigtypes.OperatingSystemUbuntu:     nil,
-	providerconfigtypes.OperatingSystemRHEL:       nil,
-	providerconfigtypes.OperatingSystemFlatcar:    nil,
-	providerconfigtypes.OperatingSystemRockyLinux: nil,
-}
 
 type provider struct {
 	configVarResolver *providerconfig.ConfigVarResolver
@@ -86,21 +87,22 @@ func New(configVarResolver *providerconfig.ConfigVarResolver) cloudprovidertypes
 }
 
 type Config struct {
-	Kubeconfig            string
-	RestConfig            *rest.Config
-	DNSConfig             *corev1.PodDNSConfig
-	DNSPolicy             corev1.DNSPolicy
-	CPUs                  string
-	Memory                string
-	Namespace             string
-	OsImage               OSImage
-	StorageClassName      string
-	PVCSize               resource.Quantity
-	FlavorName            string
-	SecondaryDisks        []SecondaryDisks
-	PodAffinityPreset     AffinityType
-	PodAntiAffinityPreset AffinityType
-	NodeAffinityPreset    NodeAffinityPreset
+	Kubeconfig                string
+	ClusterName               string
+	RestConfig                *rest.Config
+	DNSConfig                 *corev1.PodDNSConfig
+	DNSPolicy                 corev1.DNSPolicy
+	CPUs                      string
+	Memory                    string
+	Namespace                 string
+	OSImageSource             *cdiv1beta1.DataVolumeSource
+	StorageClassName          string
+	PVCSize                   resource.Quantity
+	Instancetype              *kubevirtv1.InstancetypeMatcher
+	Preference                *kubevirtv1.PreferenceMatcher
+	SecondaryDisks            []SecondaryDisks
+	NodeAffinityPreset        NodeAffinityPreset
+	TopologySpreadConstraints []corev1.TopologySpreadConstraint
 }
 
 type AffinityType string
@@ -140,13 +142,9 @@ type NodeAffinityPreset struct {
 }
 
 type SecondaryDisks struct {
+	Name             string
 	Size             resource.Quantity
 	StorageClassName string
-}
-
-type OSImage struct {
-	URL            string
-	DataVolumeName string
 }
 
 type kubeVirtServer struct {
@@ -229,6 +227,11 @@ func (p *provider) getConfig(provSpec clusterv1alpha1.ProviderSpec) (*Config, *p
 		}
 	}
 
+	config.ClusterName, err = p.configVarResolver.GetConfigVarStringValue(rawConfig.ClusterName)
+	if err != nil {
+		return nil, nil, fmt.Errorf(`failed to get value of "clusterName" field: %w`, err)
+	}
+
 	config.RestConfig, err = clientcmd.RESTConfigFromKubeConfig([]byte(config.Kubeconfig))
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to decode kubeconfig: %w", err)
@@ -243,15 +246,12 @@ func (p *provider) getConfig(provSpec clusterv1alpha1.ProviderSpec) (*Config, *p
 		return nil, nil, fmt.Errorf(`failed to get value of "memory" field: %w`, err)
 	}
 	config.Namespace = getNamespace()
-	osImage, err := p.configVarResolver.GetConfigVarStringValue(rawConfig.VirtualMachine.Template.PrimaryDisk.OsImage)
+
+	config.OSImageSource, err = p.parseOSImageSource(rawConfig.VirtualMachine.Template.PrimaryDisk, config.Namespace)
 	if err != nil {
-		return nil, nil, fmt.Errorf(`failed to get value of "sourceURL" field: %w`, err)
+		return nil, nil, fmt.Errorf(`failed to get value of "osImageSource" field: %w`, err)
 	}
-	if _, err = url.ParseRequestURI(osImage); err == nil {
-		config.OsImage.URL = osImage
-	} else {
-		config.OsImage.DataVolumeName = osImage
-	}
+
 	pvcSize, err := p.configVarResolver.GetConfigVarStringValue(rawConfig.VirtualMachine.Template.PrimaryDisk.Size)
 	if err != nil {
 		return nil, nil, fmt.Errorf(`failed to get value of "pvcSize" field: %w`, err)
@@ -263,10 +263,10 @@ func (p *provider) getConfig(provSpec clusterv1alpha1.ProviderSpec) (*Config, *p
 	if err != nil {
 		return nil, nil, fmt.Errorf(`failed to get value of "storageClassName" field: %w`, err)
 	}
-	config.FlavorName, err = p.configVarResolver.GetConfigVarStringValue(rawConfig.VirtualMachine.Flavor.Name)
-	if err != nil {
-		return nil, nil, fmt.Errorf(`failed to get value of "flavor.name" field: %w`, err)
-	}
+
+	// Instancetype and Preference
+	config.Instancetype = rawConfig.VirtualMachine.Instancetype
+	config.Preference = rawConfig.VirtualMachine.Preference
 
 	dnsPolicyString, err := p.configVarResolver.GetConfigVarStringValue(rawConfig.VirtualMachine.DNSPolicy)
 	if err != nil {
@@ -282,7 +282,7 @@ func (p *provider) getConfig(provSpec clusterv1alpha1.ProviderSpec) (*Config, *p
 		config.DNSConfig = rawConfig.VirtualMachine.DNSConfig
 	}
 	config.SecondaryDisks = make([]SecondaryDisks, 0, len(rawConfig.VirtualMachine.Template.SecondaryDisks))
-	for _, sd := range rawConfig.VirtualMachine.Template.SecondaryDisks {
+	for i, sd := range rawConfig.VirtualMachine.Template.SecondaryDisks {
 		sdSizeString, err := p.configVarResolver.GetConfigVarStringValue(sd.Size)
 		if err != nil {
 			return nil, nil, fmt.Errorf(`failed to parse "secondaryDisks.size" field: %w`, err)
@@ -297,23 +297,19 @@ func (p *provider) getConfig(provSpec clusterv1alpha1.ProviderSpec) (*Config, *p
 			return nil, nil, fmt.Errorf(`failed to parse value of "secondaryDisks.storageClass" field: %w`, err)
 		}
 		config.SecondaryDisks = append(config.SecondaryDisks, SecondaryDisks{
+			Name:             fmt.Sprintf("secondarydisk%d", i),
 			Size:             pvc,
 			StorageClassName: scString,
 		})
 	}
 
-	// Affinity/AntiAffinity
-	config.PodAffinityPreset, err = p.affinityType(rawConfig.Affinity.PodAffinityPreset)
-	if err != nil {
-		return nil, nil, fmt.Errorf(`failed to parse "podAffinityPreset" field: %w`, err)
-	}
-	config.PodAntiAffinityPreset, err = p.affinityType(rawConfig.Affinity.PodAntiAffinityPreset)
-	if err != nil {
-		return nil, nil, fmt.Errorf(`failed to parse "podAntiAffinityPreset" field: %w`, err)
-	}
 	config.NodeAffinityPreset, err = p.parseNodeAffinityPreset(rawConfig.Affinity.NodeAffinityPreset)
 	if err != nil {
 		return nil, nil, fmt.Errorf(`failed to parse "nodeAffinityPreset" field: %w`, err)
+	}
+	config.TopologySpreadConstraints, err = p.parseTopologySpreadConstraint(rawConfig.TopologySpreadConstraints)
+	if err != nil {
+		return nil, nil, fmt.Errorf(`failed to parse "topologySpreadConstraints" field: %w`, err)
 	}
 
 	return &config, pconfig, nil
@@ -330,7 +326,7 @@ func (p *provider) parseNodeAffinityPreset(nodeAffinityPreset kubevirttypes.Node
 	if err != nil {
 		return nodeAffinity, fmt.Errorf(`failed to parse "nodeAffinity.key" field: %w`, err)
 	}
-	nodeAffinity.Values = make([]string, len(nodeAffinityPreset.Values))
+	nodeAffinity.Values = make([]string, 0, len(nodeAffinityPreset.Values))
 	for _, v := range nodeAffinityPreset.Values {
 		valueString, err := p.configVarResolver.GetConfigVarStringValue(v)
 		if err != nil {
@@ -339,6 +335,63 @@ func (p *provider) parseNodeAffinityPreset(nodeAffinityPreset kubevirttypes.Node
 		nodeAffinity.Values = append(nodeAffinity.Values, valueString)
 	}
 	return nodeAffinity, nil
+}
+
+func (p *provider) parseTopologySpreadConstraint(topologyConstraints []kubevirttypes.TopologySpreadConstraint) ([]corev1.TopologySpreadConstraint, error) {
+	parsedTopologyConstraints := make([]corev1.TopologySpreadConstraint, 0, len(topologyConstraints))
+	for _, constraint := range topologyConstraints {
+		maxSkewString, err := p.configVarResolver.GetConfigVarStringValue(constraint.MaxSkew)
+		if err != nil {
+			return nil, fmt.Errorf(`failed to parse "topologySpreadConstraint.maxSkew" field: %w`, err)
+		}
+		maxSkew, err := strconv.ParseInt(maxSkewString, 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf(`failed to parse "topologySpreadConstraint.maxSkew" field: %w`, err)
+		}
+		topologyKey, err := p.configVarResolver.GetConfigVarStringValue(constraint.TopologyKey)
+		if err != nil {
+			return nil, fmt.Errorf(`failed to parse "topologySpreadConstraint.topologyKey" field: %w`, err)
+		}
+		whenUnsatisfiable, err := p.configVarResolver.GetConfigVarStringValue(constraint.WhenUnsatisfiable)
+		if err != nil {
+			return nil, fmt.Errorf(`failed to parse "topologySpreadConstraint.whenUnsatisfiable" field: %w`, err)
+		}
+		parsedTopologyConstraints = append(parsedTopologyConstraints, corev1.TopologySpreadConstraint{
+			MaxSkew:           int32(maxSkew),
+			TopologyKey:       topologyKey,
+			WhenUnsatisfiable: corev1.UnsatisfiableConstraintAction(whenUnsatisfiable),
+		})
+	}
+	return parsedTopologyConstraints, nil
+}
+
+func (p *provider) parseOSImageSource(primaryDisk kubevirttypes.PrimaryDisk, namespace string) (*cdiv1beta1.DataVolumeSource, error) {
+	osImage, err := p.configVarResolver.GetConfigVarStringValue(primaryDisk.OsImage)
+	if err != nil {
+		return nil, fmt.Errorf(`failed to get value of "primaryDisk.osImage" field: %w`, err)
+	}
+	osImageSource, err := p.configVarResolver.GetConfigVarStringValue(primaryDisk.Source)
+	if err != nil {
+		return nil, fmt.Errorf(`failed to get value of "primaryDisk.source" field: %w`, err)
+	}
+	switch imageSource(osImageSource) {
+	case httpSource:
+		return &cdiv1beta1.DataVolumeSource{HTTP: &cdiv1beta1.DataVolumeSourceHTTP{URL: osImage}}, nil
+	case pvcSource:
+		if namespaceAndName := strings.Split(osImage, "/"); len(namespaceAndName) >= 2 {
+			return &cdiv1beta1.DataVolumeSource{PVC: &cdiv1beta1.DataVolumeSourcePVC{Name: namespaceAndName[1], Namespace: namespaceAndName[0]}}, nil
+		}
+		return &cdiv1beta1.DataVolumeSource{PVC: &cdiv1beta1.DataVolumeSourcePVC{Name: osImage, Namespace: namespace}}, nil
+	default:
+		// handle old API for backward compatibility.
+		if _, err = url.ParseRequestURI(osImage); err == nil {
+			return &cdiv1beta1.DataVolumeSource{HTTP: &cdiv1beta1.DataVolumeSourceHTTP{URL: osImage}}, nil
+		}
+		if namespaceAndName := strings.Split(osImage, "/"); len(namespaceAndName) >= 2 {
+			return &cdiv1beta1.DataVolumeSource{PVC: &cdiv1beta1.DataVolumeSourcePVC{Name: namespaceAndName[1], Namespace: namespaceAndName[0]}}, nil
+		}
+		return &cdiv1beta1.DataVolumeSource{PVC: &cdiv1beta1.DataVolumeSourcePVC{Name: osImage, Namespace: namespace}}, nil
+	}
 }
 
 // getNamespace returns the namespace where the VM is created.
@@ -419,8 +472,9 @@ func (p *provider) Validate(ctx context.Context, spec clusterv1alpha1.MachineSpe
 	if err != nil {
 		return fmt.Errorf("failed to parse config: %w", err)
 	}
-	// If VMIPreset is specified, skip CPU and Memory validation.
-	if c.FlavorName == "" {
+	// If instancetype is specified, skip CPU and Memory validation.
+	// Values will come from instancetype.
+	if c.Instancetype == nil {
 		if _, err := parseResources(c.CPUs, c.Memory); err != nil {
 			return err
 		}
@@ -430,7 +484,7 @@ func (p *provider) Validate(ctx context.Context, spec clusterv1alpha1.MachineSpe
 	if err != nil {
 		return fmt.Errorf("failed to get kubevirt client: %w", err)
 	}
-	if _, ok := supportedOS[pc.OperatingSystem]; !ok {
+	if _, ok := kubevirttypes.SupportedOS[pc.OperatingSystem]; !ok {
 		return fmt.Errorf("invalid/not supported operating system specified %q: %w", pc.OperatingSystem, providerconfigtypes.ErrOSNotSupported)
 	}
 	if c.DNSPolicy == corev1.DNSNone {
@@ -456,8 +510,9 @@ func (p *provider) GetCloudConfig(spec clusterv1alpha1.MachineSpec) (config stri
 	if err != nil {
 		return "", "", fmt.Errorf("failed to parse config: %w", err)
 	}
+
 	cc := kubevirttypes.CloudConfig{
-		Kubeconfig: c.Kubeconfig,
+		Namespace: c.Namespace,
 	}
 	ccs, err := cc.String()
 
@@ -471,10 +526,23 @@ func (p *provider) MachineMetricsLabels(machine *clusterv1alpha1.Machine) (map[s
 	if err == nil {
 		labels["cpus"] = c.CPUs
 		labels["memoryMIB"] = c.Memory
-		labels["osImage"] = c.OsImage.URL
+		if c.OSImageSource.HTTP != nil {
+			labels["osImage"] = c.OSImageSource.HTTP.URL
+		} else if c.OSImageSource.PVC != nil {
+			labels["osImage"] = c.OSImageSource.PVC.Name
+		}
 	}
 
 	return labels, err
+}
+
+type machineDeploymentNameGetter func() (string, error)
+
+func machineDeploymentNameAndRevisionForMachineGetter(ctx context.Context, machine *clusterv1alpha1.Machine, c client.Client) machineDeploymentNameGetter {
+	mdName, _, err := controllerutil.GetMachineDeploymentNameAndRevisionForMachine(ctx, machine, c)
+	return func() (string, error) {
+		return mdName, err
+	}
 }
 
 func (p *provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData, userdata string) (instance.Instance, error) {
@@ -486,97 +554,17 @@ func (p *provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine,
 		}
 	}
 
-	// We add the timestamp because the secret name must be different when we recreate the VMI
-	// because its pod got deleted
-	// The secret has an ownerRef on the VMI so garbace collection will take care of cleaning up.
-	terminationGracePeriodSeconds := int64(30)
-	userDataSecretName := fmt.Sprintf("userdata-%s-%s", machine.Name, strconv.Itoa(int(time.Now().Unix())))
-
-	resourceRequirements := kubevirtv1.ResourceRequirements{}
-	labels := map[string]string{"kubevirt.io/vm": machine.Name}
-	// Add a common label to all VirtualMachines spawned by the same MachineDeployment (= MachineDeployment name).
-	if mdName, _, err := controllerutil.GetMachineDeploymentNameAndRevisionForMachine(ctx, machine, data.Client); err == nil {
-		labels[machineDeploymentLabelKey] = mdName
-	}
-
 	sigClient, err := client.New(c.RestConfig, client.Options{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to get kubevirt client: %w", err)
 	}
 
-	// Add VMIPreset label if specified
-	if c.FlavorName != "" {
-		vmiPreset := kubevirtv1.VirtualMachineInstancePreset{}
-		if err := sigClient.Get(ctx, types.NamespacedName{Namespace: c.Namespace, Name: c.FlavorName}, &vmiPreset); err != nil {
-			return nil, err
-		}
-		for key, val := range vmiPreset.Spec.Selector.MatchLabels {
-			labels[key] = val
-		}
-	} else {
-		requestsAndLimits, err := parseResources(c.CPUs, c.Memory)
-		if err != nil {
-			return nil, err
-		}
-		resourceRequirements.Requests = *requestsAndLimits
-		resourceRequirements.Limits = *requestsAndLimits
-	}
+	userDataSecretName := fmt.Sprintf("userdata-%s-%s", machine.Name, strconv.Itoa(int(time.Now().Unix())))
 
-	var (
-		dataVolumeName = machine.Name
-		annotations    map[string]string
-	)
-
-	if pc.OperatingSystem == providerconfigtypes.OperatingSystemFlatcar {
-		annotations = map[string]string{
-			"kubevirt.io/ignitiondata": userdata,
-		}
-	}
-
-	// we need this check until this issue is resolved:
-	// https://github.com/kubevirt/containerized-data-importer/issues/895
-	if len(dataVolumeName) > 63 {
-		return nil, fmt.Errorf("dataVolumeName size %v, is bigger than 63 characters", len(dataVolumeName))
-	}
-
-	defaultBridgeNetwork, err := defaultBridgeNetwork()
+	virtualMachine, err := p.newVirtualMachine(ctx, c, pc, machine, userDataSecretName, userdata,
+		machineDeploymentNameAndRevisionForMachineGetter(ctx, machine, data.Client), randomMacAddressGetter, sigClient)
 	if err != nil {
-		return nil, fmt.Errorf("could not compute a random MAC address")
-	}
-
-	virtualMachine := &kubevirtv1.VirtualMachine{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      machine.Name,
-			Namespace: c.Namespace,
-			Labels:    labels,
-		},
-		Spec: kubevirtv1.VirtualMachineSpec{
-			Running: utilpointer.BoolPtr(true),
-			Template: &kubevirtv1.VirtualMachineInstanceTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Annotations: annotations,
-					Labels:      labels,
-				},
-				Spec: kubevirtv1.VirtualMachineInstanceSpec{
-					Networks: []kubevirtv1.Network{
-						*kubevirtv1.DefaultPodNetwork(),
-					},
-					Domain: kubevirtv1.DomainSpec{
-						Devices: kubevirtv1.Devices{
-							Disks:      getVMDisks(c),
-							Interfaces: []kubevirtv1.Interface{*defaultBridgeNetwork},
-						},
-						Resources: resourceRequirements,
-					},
-					Affinity:                      getAffinity(c, machineDeploymentLabelKey, labels[machineDeploymentLabelKey]),
-					TerminationGracePeriodSeconds: &terminationGracePeriodSeconds,
-					Volumes:                       getVMVolumes(c, dataVolumeName, userDataSecretName),
-					DNSPolicy:                     c.DNSPolicy,
-					DNSConfig:                     c.DNSConfig,
-				},
-			},
-			DataVolumeTemplates: getDataVolumeTemplates(c, dataVolumeName),
-		},
+		return nil, fmt.Errorf("could not create a VirtualMachine manifest %w", err)
 	}
 
 	if err := sigClient.Create(ctx, virtualMachine); err != nil {
@@ -595,6 +583,95 @@ func (p *provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine,
 		return nil, fmt.Errorf("failed to create secret for userdata: %w", err)
 	}
 	return &kubeVirtServer{}, nil
+}
+
+func (p *provider) newVirtualMachine(ctx context.Context, c *Config, pc *providerconfigtypes.Config, machine *clusterv1alpha1.Machine,
+	userdataSecretName, userdata string, mdNameGetter machineDeploymentNameGetter, macAddressGetter macAddressGetter, sigClient client.Client) (*kubevirtv1.VirtualMachine, error) {
+	// We add the timestamp because the secret name must be different when we recreate the VMI
+	// because its pod got deleted
+	// The secret has an ownerRef on the VMI so garbace collection will take care of cleaning up.
+	terminationGracePeriodSeconds := int64(30)
+
+	evictionStrategy := kubevirtv1.EvictionStrategyExternal
+
+	resourceRequirements := kubevirtv1.ResourceRequirements{}
+	labels := map[string]string{"kubevirt.io/vm": machine.Name}
+	//Add a common label to all VirtualMachines spawned by the same MachineDeployment (= MachineDeployment name).
+	if mdName, err := mdNameGetter(); err == nil {
+		labels[machineDeploymentLabelKey] = mdName
+	}
+
+	// if no instancetype, resources are from config.
+	if c.Instancetype == nil {
+		requestsAndLimits, err := parseResources(c.CPUs, c.Memory)
+		if err != nil {
+			return nil, err
+		}
+		resourceRequirements.Requests = *requestsAndLimits
+		resourceRequirements.Limits = *requestsAndLimits
+	}
+
+	// Add cluster labels
+	labels["cluster.x-k8s.io/cluster-name"] = c.ClusterName
+	labels["cluster.x-k8s.io/role"] = "worker"
+
+	var (
+		dataVolumeName = machine.Name
+		annotations    map[string]string
+	)
+	// Add machineName as prefix to secondaryDisks.
+	addPrefixToSecondaryDisk(c.SecondaryDisks, dataVolumeName)
+
+	if pc.OperatingSystem == providerconfigtypes.OperatingSystemFlatcar {
+		annotations = map[string]string{
+			"kubevirt.io/ignitiondata": userdata,
+		}
+	}
+
+	defaultBridgeNetwork, err := defaultBridgeNetwork(macAddressGetter)
+	if err != nil {
+		return nil, fmt.Errorf("could not compute a random MAC address")
+	}
+
+	virtualMachine := &kubevirtv1.VirtualMachine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      machine.Name,
+			Namespace: c.Namespace,
+			Labels:    labels,
+		},
+		Spec: kubevirtv1.VirtualMachineSpec{
+			Running:      utilpointer.Bool(true),
+			Instancetype: c.Instancetype,
+			Preference:   c.Preference,
+			Template: &kubevirtv1.VirtualMachineInstanceTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: annotations,
+					Labels:      labels,
+				},
+				Spec: kubevirtv1.VirtualMachineInstanceSpec{
+					EvictionStrategy: &evictionStrategy,
+					Networks: []kubevirtv1.Network{
+						*kubevirtv1.DefaultPodNetwork(),
+					},
+					Domain: kubevirtv1.DomainSpec{
+						Devices: kubevirtv1.Devices{
+							Disks:      getVMDisks(c),
+							Interfaces: []kubevirtv1.Interface{*defaultBridgeNetwork},
+						},
+						Resources: resourceRequirements,
+					},
+					Affinity:                      getAffinity(c, machineDeploymentLabelKey, labels[machineDeploymentLabelKey]),
+					TerminationGracePeriodSeconds: &terminationGracePeriodSeconds,
+					Volumes:                       getVMVolumes(c, dataVolumeName, userdataSecretName),
+					DNSPolicy:                     c.DNSPolicy,
+					DNSConfig:                     c.DNSConfig,
+					TopologySpreadConstraints:     getTopologySpreadConstraints(c, map[string]string{machineDeploymentLabelKey: labels[machineDeploymentLabelKey]}),
+				},
+			},
+			DataVolumeTemplates: getDataVolumeTemplates(c, dataVolumeName),
+		},
+	}
+	return virtualMachine, nil
 }
 
 func (p *provider) Cleanup(ctx context.Context, machine *clusterv1alpha1.Machine, _ *cloudprovidertypes.ProviderData) (bool, error) {
@@ -667,22 +744,32 @@ func getVMDisks(config *Config) []kubevirtv1.Disk {
 			DiskDevice: kubevirtv1.DiskDevice{Disk: &kubevirtv1.DiskTarget{Bus: "virtio"}},
 		},
 	}
-	for i := range config.SecondaryDisks {
+	for _, sd := range config.SecondaryDisks {
 		disks = append(disks, kubevirtv1.Disk{
-			Name:       "secondarydisk" + strconv.Itoa(i),
+			Name:       sd.Name,
 			DiskDevice: kubevirtv1.DiskDevice{Disk: &kubevirtv1.DiskTarget{Bus: "virtio"}},
 		})
 	}
 	return disks
 }
 
-func defaultBridgeNetwork() (*kubevirtv1.Interface, error) {
-	defaultBridgeNetwork := kubevirtv1.DefaultBridgeNetworkInterface()
+type macAddressGetter func() (string, error)
+
+func randomMacAddressGetter() (string, error) {
 	mac, err := netutil.GenerateRandMAC()
+	if err != nil {
+		return "", err
+	}
+	return mac.String(), nil
+}
+
+func defaultBridgeNetwork(macAddressGetter macAddressGetter) (*kubevirtv1.Interface, error) {
+	defaultBridgeNetwork := kubevirtv1.DefaultBridgeNetworkInterface()
+	mac, err := macAddressGetter()
 	if err != nil {
 		return nil, err
 	}
-	defaultBridgeNetwork.MacAddress = mac.String()
+	defaultBridgeNetwork.MacAddress = mac
 	return defaultBridgeNetwork, nil
 }
 
@@ -707,12 +794,12 @@ func getVMVolumes(config *Config, dataVolumeName string, userDataSecretName stri
 			},
 		},
 	}
-	for i := range config.SecondaryDisks {
+	for _, sd := range config.SecondaryDisks {
 		volumes = append(volumes, kubevirtv1.Volume{
-			Name: "secondarydisk" + strconv.Itoa(i),
+			Name: sd.Name,
 			VolumeSource: kubevirtv1.VolumeSource{
 				DataVolume: &kubevirtv1.DataVolumeSource{
-					Name: "secondarydisk" + strconv.Itoa(i),
+					Name: sd.Name,
 				}},
 		})
 	}
@@ -720,7 +807,6 @@ func getVMVolumes(config *Config, dataVolumeName string, userDataSecretName stri
 }
 
 func getDataVolumeTemplates(config *Config, dataVolumeName string) []kubevirtv1.DataVolumeTemplateSpec {
-	dataVolumeSource := getDataVolumeSource(config.OsImage)
 	pvcRequest := corev1.ResourceList{corev1.ResourceStorage: config.PVCSize}
 	dataVolumeTemplates := []kubevirtv1.DataVolumeTemplateSpec{
 		{
@@ -729,7 +815,7 @@ func getDataVolumeTemplates(config *Config, dataVolumeName string) []kubevirtv1.
 			},
 			Spec: cdiv1beta1.DataVolumeSpec{
 				PVC: &corev1.PersistentVolumeClaimSpec{
-					StorageClassName: utilpointer.StringPtr(config.StorageClassName),
+					StorageClassName: utilpointer.String(config.StorageClassName),
 					AccessModes: []corev1.PersistentVolumeAccessMode{
 						"ReadWriteOnce",
 					},
@@ -737,18 +823,18 @@ func getDataVolumeTemplates(config *Config, dataVolumeName string) []kubevirtv1.
 						Requests: pvcRequest,
 					},
 				},
-				Source: dataVolumeSource,
+				Source: config.OSImageSource,
 			},
 		},
 	}
-	for i, sd := range config.SecondaryDisks {
+	for _, sd := range config.SecondaryDisks {
 		dataVolumeTemplates = append(dataVolumeTemplates, kubevirtv1.DataVolumeTemplateSpec{
 			ObjectMeta: metav1.ObjectMeta{
-				Name: "secondarydisk" + strconv.Itoa(i),
+				Name: sd.Name,
 			},
 			Spec: cdiv1beta1.DataVolumeSpec{
 				PVC: &corev1.PersistentVolumeClaimSpec{
-					StorageClassName: utilpointer.StringPtr(sd.StorageClassName),
+					StorageClassName: utilpointer.String(sd.StorageClassName),
 					AccessModes: []corev1.PersistentVolumeAccessMode{
 						"ReadWriteOnce",
 					},
@@ -756,54 +842,27 @@ func getDataVolumeTemplates(config *Config, dataVolumeName string) []kubevirtv1.
 						Requests: corev1.ResourceList{corev1.ResourceStorage: sd.Size},
 					},
 				},
-				Source: dataVolumeSource,
+				Source: config.OSImageSource,
 			},
 		})
 	}
 	return dataVolumeTemplates
 }
 
-// getDataVolumeSource returns DataVolumeSource, HTTP or PVC.
-func getDataVolumeSource(osImage OSImage) *cdiv1beta1.DataVolumeSource {
-	dataVolumeSource := &cdiv1beta1.DataVolumeSource{}
-	if osImage.URL != "" {
-		dataVolumeSource.HTTP = &cdiv1beta1.DataVolumeSourceHTTP{URL: osImage.URL}
-	} else if osImage.DataVolumeName != "" {
-		if nameSpaceAndName := strings.Split(osImage.DataVolumeName, "/"); len(nameSpaceAndName) >= 2 {
-			dataVolumeSource.PVC = &cdiv1beta1.DataVolumeSourcePVC{
-				Namespace: nameSpaceAndName[0],
-				Name:      nameSpaceAndName[1],
-			}
-		}
-	}
-	return dataVolumeSource
-}
-
 func getAffinity(config *Config, matchKey, matchValue string) *corev1.Affinity {
 	affinity := &corev1.Affinity{}
 
-	// PodAffinity
-	switch config.PodAffinityPreset {
-	case softAffinityType:
-		affinity.PodAffinity = &corev1.PodAffinity{
-			PreferredDuringSchedulingIgnoredDuringExecution: hostnameWeightedAffinityTerm(matchKey, matchValue),
-		}
-	case hardAffinityType:
-		affinity.PodAffinity = &corev1.PodAffinity{
-			RequiredDuringSchedulingIgnoredDuringExecution: hostnameAffinityTerm(matchKey, matchValue),
-		}
+	expressions := []corev1.NodeSelectorRequirement{
+		{
+			Key:      config.NodeAffinityPreset.Key,
+			Operator: corev1.NodeSelectorOperator(metav1.LabelSelectorOpExists),
+		},
 	}
 
-	// PodAntiAffinity
-	switch config.PodAntiAffinityPreset {
-	case softAffinityType:
-		affinity.PodAntiAffinity = &corev1.PodAntiAffinity{
-			PreferredDuringSchedulingIgnoredDuringExecution: hostnameWeightedAffinityTerm(matchKey, matchValue),
-		}
-	case hardAffinityType:
-		affinity.PodAntiAffinity = &corev1.PodAntiAffinity{
-			RequiredDuringSchedulingIgnoredDuringExecution: hostnameAffinityTerm(matchKey, matchValue),
-		}
+	// change the operator if any values were passed for node affinity matching
+	if len(config.NodeAffinityPreset.Values) > 0 {
+		expressions[0].Operator = corev1.NodeSelectorOperator(metav1.LabelSelectorOpIn)
+		expressions[0].Values = config.NodeAffinityPreset.Values
 	}
 
 	// NodeAffinity
@@ -814,13 +873,7 @@ func getAffinity(config *Config, matchKey, matchValue string) *corev1.Affinity {
 				{
 					Weight: 1,
 					Preference: corev1.NodeSelectorTerm{
-						MatchExpressions: []corev1.NodeSelectorRequirement{
-							{
-								Key:      config.NodeAffinityPreset.Key,
-								Values:   config.NodeAffinityPreset.Values,
-								Operator: corev1.NodeSelectorOperator(metav1.LabelSelectorOpIn),
-							},
-						},
+						MatchExpressions: expressions,
 					},
 				},
 			},
@@ -830,13 +883,7 @@ func getAffinity(config *Config, matchKey, matchValue string) *corev1.Affinity {
 			RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
 				NodeSelectorTerms: []corev1.NodeSelectorTerm{
 					{
-						MatchExpressions: []corev1.NodeSelectorRequirement{
-							{
-								Key:      config.NodeAffinityPreset.Key,
-								Values:   config.NodeAffinityPreset.Values,
-								Operator: corev1.NodeSelectorOperator(metav1.LabelSelectorOpIn),
-							},
-						},
+						MatchExpressions: expressions,
 					},
 				},
 			},
@@ -846,31 +893,26 @@ func getAffinity(config *Config, matchKey, matchValue string) *corev1.Affinity {
 	return affinity
 }
 
-func hostnameWeightedAffinityTerm(matchKey, matchValue string) []corev1.WeightedPodAffinityTerm {
-	return []corev1.WeightedPodAffinityTerm{
-		{
-			Weight: 1,
-			PodAffinityTerm: corev1.PodAffinityTerm{
-				LabelSelector: &metav1.LabelSelector{
-					MatchLabels: map[string]string{
-						matchKey: matchValue,
-					},
-				},
-				TopologyKey: topologyKeyHostname,
-			},
-		},
+func addPrefixToSecondaryDisk(secondaryDisks []SecondaryDisks, prefix string) {
+	for i := range secondaryDisks {
+		secondaryDisks[i].Name = fmt.Sprintf("%s-%s", prefix, secondaryDisks[i].Name)
 	}
 }
 
-func hostnameAffinityTerm(matchKey, matchValue string) []corev1.PodAffinityTerm {
-	return []corev1.PodAffinityTerm{
+func getTopologySpreadConstraints(config *Config, matchLabels map[string]string) []corev1.TopologySpreadConstraint {
+	if len(config.TopologySpreadConstraints) != 0 {
+		for i := range config.TopologySpreadConstraints {
+			config.TopologySpreadConstraints[i].LabelSelector = &metav1.LabelSelector{MatchLabels: matchLabels}
+		}
+		return config.TopologySpreadConstraints
+	}
+	// Return default TopologySpreadConstraint
+	return []corev1.TopologySpreadConstraint{
 		{
-			LabelSelector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					matchKey: matchValue,
-				},
-			},
-			TopologyKey: topologyKeyHostname,
+			MaxSkew:           1,
+			TopologyKey:       topologyKeyHostname,
+			WhenUnsatisfiable: corev1.ScheduleAnyway,
+			LabelSelector:     &metav1.LabelSelector{MatchLabels: matchLabels},
 		},
 	}
 }

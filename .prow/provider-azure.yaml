@@ -14,7 +14,7 @@
 
 presubmits:
   - name: pull-machine-controller-e2e-azure
-    always_run: true
+    run_if_changed: "(pkg/cloudprovider/provider/azure/|pkg/userdata)"
     decorate: true
     clone_uri: "ssh://git@github.com/kubermatic/machine-controller.git"
     labels:
@@ -28,22 +28,25 @@ presubmits:
       preset-kubeconfig-ci: "true"
     spec:
       containers:
-        - image: quay.io/kubermatic/build:go-1.18-node-16-kind-0.14-9
+        - image: quay.io/kubermatic/build:go-1.19-node-18-kind-0.17-5
           command:
             - "./hack/ci/run-e2e-tests.sh"
           args:
             - "TestAzureProvisioningE2E"
+          env:
+            - name: CLOUD_PROVIDER
+              value: azure
           securityContext:
             privileged: true
           resources:
             requests:
-              memory: 6Gi
+              memory: 7Gi
               cpu: 2
             limits:
-              memory: 6Gi
+              memory: 7Gi
 
   - name: pull-machine-controller-e2e-azure-custom-image-reference
-    always_run: true
+    run_if_changed: "(pkg/cloudprovider/provider/azure/|pkg/userdata)"
     decorate: true
     clone_uri: "ssh://git@github.com/kubermatic/machine-controller.git"
     labels:
@@ -57,19 +60,22 @@ presubmits:
       preset-kubeconfig-ci: "true"
     spec:
       containers:
-        - image: quay.io/kubermatic/build:go-1.18-node-16-kind-0.14-9
+        - image: quay.io/kubermatic/build:go-1.19-node-18-kind-0.17-5
           command:
             - "./hack/ci/run-e2e-tests.sh"
           args:
             - "TestAzureCustomImageReferenceProvisioningE2E"
+          env:
+            - name: CLOUD_PROVIDER
+              value: azure
           securityContext:
             privileged: true
           resources:
             requests:
-              memory: 6Gi
+              memory: 7Gi
               cpu: 2
             limits:
-              memory: 6Gi
+              memory: 7Gi
 
   - name: pull-machine-controller-e2e-azure-redhat-satellite
     optional: true
@@ -87,16 +93,19 @@ presubmits:
       preset-kubeconfig-ci: "true"
     spec:
       containers:
-        - image: quay.io/kubermatic/build:go-1.18-node-16-kind-0.14-9
+        - image: quay.io/kubermatic/build:go-1.19-node-18-kind-0.17-5
           command:
             - "./hack/ci/run-e2e-tests.sh"
           args:
             - "TestAzureProvisioningE2ERedhatSatellite"
+          env:
+            - name: CLOUD_PROVIDER
+              value: azure
           securityContext:
             privileged: true
           resources:
             requests:
-              memory: 6Gi
+              memory: 7Gi
               cpu: 2
             limits:
-              memory: 6Gi
+              memory: 7Gi

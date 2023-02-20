@@ -233,6 +233,18 @@ write_files:
     {{ end }}
 {{ .ContainerRuntimeScript | indent 4 }}
 {{ safeDownloadBinariesScript .KubeletVersion | indent 4 }}
+    DEFAULT_IFC_NAME=$(ip -o route get 1  | grep -oP "dev \K\S+")
+    IFC_CFG_FILE=/etc/sysconfig/network-scripts/ifcfg-$DEFAULT_IFC_NAME
+    # Enable IPv6 and DHCPv6 on the default interface
+    grep IPV6INIT $IFC_CFG_FILE && sed -i '/IPV6INIT*/c IPV6INIT=yes' $IFC_CFG_FILE || echo "IPV6INIT=yes" >> $IFC_CFG_FILE
+    grep DHCPV6C $IFC_CFG_FILE && sed -i '/DHCPV6C*/c DHCPV6C=yes' $IFC_CFG_FILE || echo "DHCPV6C=yes" >> $IFC_CFG_FILE
+    grep IPV6_AUTOCONF $IFC_CFG_FILE && sed -i '/IPV6_AUTOCONF*/c IPV6_AUTOCONF=yes' $IFC_CFG_FILE || echo "IPV6_AUTOCONF=yes" >> $IFC_CFG_FILE
+
+    # Restart NetworkManager to apply for IPv6 configs
+    systemctl restart NetworkManager
+    # Let NetworkManager apply the DHCPv6 configs
+    sleep 3
+
     # set kubelet nodeip environment variable
     mkdir -p /etc/systemd/system/kubelet.service.d/
     /opt/bin/setup_net_env.sh
@@ -266,10 +278,12 @@ write_files:
   content: |
 {{ kubeletSystemdUnit .ContainerRuntimeName .KubeletVersion .KubeletCloudProviderName .MachineSpec.Name .DNSIPs .ExternalCloudProvider .ProviderSpec.Network.GetIPFamily .PauseImage .MachineSpec.Taints .ExtraKubeletFlags true | indent 4 }}
 
+{{- if ne (len .CloudConfig) 0 }}
 - path: "/etc/kubernetes/cloud-config"
   permissions: "0600"
   content: |
 {{ .CloudConfig | indent 4 }}
+{{- end }}
 
 - path: "/opt/bin/setup_net_env.sh"
   permissions: "0755"

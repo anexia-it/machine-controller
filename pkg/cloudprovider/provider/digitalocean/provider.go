@@ -85,7 +85,7 @@ func (t *TokenSource) Token() (*oauth2.Token, error) {
 func getSlugForOS(os providerconfigtypes.OperatingSystem) (string, error) {
 	switch os {
 	case providerconfigtypes.OperatingSystemUbuntu:
-		return "ubuntu-20-04-x64", nil
+		return "ubuntu-22-04-x64", nil
 	case providerconfigtypes.OperatingSystemCentOS:
 		return "centos-7-x64", nil
 	case providerconfigtypes.OperatingSystemRockyLinux:
@@ -190,11 +190,11 @@ func (p *provider) Validate(ctx context.Context, spec clusterv1alpha1.MachineSpe
 	}
 
 	switch f := pc.Network.GetIPFamily(); f {
-	case util.Unspecified, util.IPv4:
+	case util.IPFamilyUnspecified, util.IPFamilyIPv4:
 	// noop
-	case util.IPv6:
+	case util.IPFamilyIPv6:
 		return fmt.Errorf(util.ErrIPv6OnlyUnsupported)
-	case util.DualStack:
+	case util.IPFamilyIPv4IPv6, util.IPFamilyIPv6IPv4:
 		// noop
 	default:
 		return fmt.Errorf(util.ErrUnknownNetworkFamily, f)
@@ -310,7 +310,7 @@ func (p *provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine,
 		Name:              machine.Spec.Name,
 		Region:            c.Region,
 		Size:              c.Size,
-		IPv6:              c.IPv6 || pc.Network.GetIPFamily() == util.DualStack,
+		IPv6:              c.IPv6 || pc.Network.GetIPFamily().IsDualstack(),
 		PrivateNetworking: c.PrivateNetworking,
 		Backups:           c.Backups,
 		Monitoring:        c.Monitoring,

@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"golang.org/x/oauth2/google"
 	"golang.org/x/oauth2/jwt"
@@ -48,7 +49,7 @@ var imageProjects = map[providerconfigtypes.OperatingSystem]string{
 
 // imageFamilies maps the OS to the Google Cloud image projects.
 var imageFamilies = map[providerconfigtypes.OperatingSystem]string{
-	providerconfigtypes.OperatingSystemUbuntu: "ubuntu-2004-lts",
+	providerconfigtypes.OperatingSystemUbuntu: "ubuntu-2204-lts",
 }
 
 // diskTypes are the disk types of the Google Cloud. Map is used for
@@ -112,6 +113,9 @@ type config struct {
 	regional                     bool
 	customImage                  string
 	disableMachineServiceAccount bool
+	enableNestedVirtualization   bool
+	minCPUPlatform               string
+	guestOSFeatures              []string
 }
 
 // newConfig creates a Provider configuration out of the passed resolver and spec.
@@ -124,10 +128,11 @@ func newConfig(resolver *providerconfig.ConfigVarResolver, spec v1alpha1.Provide
 
 	// Setup configuration.
 	cfg := &config{
-		providerConfig: providerConfig,
-		labels:         cpSpec.Labels,
-		tags:           cpSpec.Tags,
-		diskSize:       cpSpec.DiskSize,
+		providerConfig:  providerConfig,
+		labels:          cpSpec.Labels,
+		tags:            cpSpec.Tags,
+		diskSize:        cpSpec.DiskSize,
+		guestOSFeatures: cpSpec.GuestOSFeatures,
 	}
 
 	cfg.serviceAccount, err = resolver.GetConfigVarStringValueOrEnv(cpSpec.ServiceAccount, envGoogleServiceAccount)
@@ -220,23 +225,39 @@ func newConfig(resolver *providerconfig.ConfigVarResolver, spec v1alpha1.Provide
 		return nil, fmt.Errorf("failed to retrieve disable machine service account: %w", err)
 	}
 
+	cfg.enableNestedVirtualization, _, err = resolver.GetConfigVarBoolValue(cpSpec.EnableNestedVirtualization)
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve enable nested virtualization: %w", err)
+	}
+
+	cfg.minCPUPlatform, err = resolver.GetConfigVarStringValue(cpSpec.MinCPUPlatform)
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve min cpu platform: %w", err)
+	}
+
 	return cfg, nil
 }
 
 // postprocessServiceAccount processes the service account and creates a JWT configuration
 // out of it.
 func (cfg *config) postprocessServiceAccount() error {
-	sa, err := base64.StdEncoding.DecodeString(cfg.serviceAccount)
-	if err != nil {
-		return fmt.Errorf("failed to decode base64 service account: %w", err)
+	sa := cfg.serviceAccount
+
+	// safely decode the service account, in case we did not read the value
+	// from a "known-safe" location (like the MachineDeployment), but from
+	// an environment variable.
+	decoded, err := base64.StdEncoding.DecodeString(cfg.serviceAccount)
+	if err == nil {
+		sa = string(decoded)
 	}
+
 	sam := map[string]string{}
-	err = json.Unmarshal(sa, &sam)
+	err = json.Unmarshal([]byte(sa), &sam)
 	if err != nil {
 		return fmt.Errorf("failed unmarshalling service account: %w", err)
 	}
 	cfg.projectID = sam["project_id"]
-	cfg.jwtConfig, err = google.JWTConfigFromJSON(sa, compute.ComputeScope)
+	cfg.jwtConfig, err = google.JWTConfigFromJSON([]byte(sa), compute.ComputeScope)
 	if err != nil {
 		return fmt.Errorf("failed preparing JWT: %w", err)
 	}
@@ -259,6 +280,12 @@ func (cfg *config) diskTypeDescriptor() string {
 // for the source image of an instance boot disk.
 func (cfg *config) sourceImageDescriptor() (string, error) {
 	if cfg.customImage != "" {
+		// If a full image identifier is provided, use it
+		if strings.HasPrefix("projects/", cfg.customImage) {
+			return cfg.customImage, nil
+		}
+
+		// Otherwise, make sure to properly prefix the image identifier
 		return fmt.Sprintf("global/images/%s", cfg.customImage), nil
 	}
 	project, ok := imageProjects[cfg.providerConfig.OperatingSystem]

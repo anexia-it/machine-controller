@@ -38,7 +38,6 @@ const (
 	OperatingSystemUbuntu       OperatingSystem = "ubuntu"
 	OperatingSystemCentOS       OperatingSystem = "centos"
 	OperatingSystemAmazonLinux2 OperatingSystem = "amzn2"
-	OperatingSystemSLES         OperatingSystem = "sles"
 	OperatingSystemRHEL         OperatingSystem = "rhel"
 	OperatingSystemFlatcar      OperatingSystem = "flatcar"
 	OperatingSystemRockyLinux   OperatingSystem = "rockylinux"
@@ -59,6 +58,7 @@ const (
 	CloudProviderNutanix             CloudProvider = "nutanix"
 	CloudProviderOpenstack           CloudProvider = "openstack"
 	CloudProviderVsphere             CloudProvider = "vsphere"
+	CloudProviderVultr               CloudProvider = "vultr"
 	CloudProviderVMwareCloudDirector CloudProvider = "vmware-cloud-director"
 	CloudProviderFake                CloudProvider = "fake"
 	CloudProviderAlibaba             CloudProvider = "alibaba"
@@ -76,7 +76,6 @@ var (
 		OperatingSystemUbuntu,
 		OperatingSystemCentOS,
 		OperatingSystemAmazonLinux2,
-		OperatingSystemSLES,
 		OperatingSystemRHEL,
 		OperatingSystemFlatcar,
 		OperatingSystemRockyLinux,
@@ -102,6 +101,7 @@ var (
 		CloudProviderAnexia,
 		CloudProviderScaleway,
 		CloudProviderBaremetal,
+		CloudProviderVultr,
 	}
 )
 
@@ -129,7 +129,7 @@ func (n *NetworkConfig) IsStaticIPConfig() bool {
 
 func (n *NetworkConfig) GetIPFamily() util.IPFamily {
 	if n == nil {
-		return util.Unspecified
+		return util.IPFamilyUnspecified
 	}
 	return n.IPFamily
 }

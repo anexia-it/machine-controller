@@ -27,8 +27,7 @@ import (
 )
 
 const (
-	LegacyContainerdVersion  = "1.4"
-	DefaultContainerdVersion = "1.5"
+	DefaultContainerdVersion = "1.6*"
 )
 
 type Containerd struct {
@@ -73,8 +72,6 @@ func (eng *Containerd) ScriptFor(os types.OperatingSystem) (string, error) {
 
 	switch os {
 	case types.OperatingSystemAmazonLinux2:
-		// Amazon Linux 2 does not have containerd 1.5
-		args.ContainerdVersion = LegacyContainerdVersion
 		err := containerdAmzn2Template.Execute(&buf, args)
 		return buf.String(), err
 	case types.OperatingSystemCentOS, types.OperatingSystemRHEL, types.OperatingSystemRockyLinux:
@@ -86,8 +83,6 @@ func (eng *Containerd) ScriptFor(os types.OperatingSystem) (string, error) {
 	case types.OperatingSystemFlatcar:
 		err := containedFlatcarTemplate.Execute(&buf, args)
 		return buf.String(), err
-	case types.OperatingSystemSLES:
-		return "", nil
 	}
 
 	return "", fmt.Errorf("unknown OS: %s", os)
@@ -106,7 +101,7 @@ ExecStart=/usr/bin/env PATH=\${TORCX_BINDIR}:\${PATH} \${TORCX_BINDIR}/container
 EOF
 
 systemctl daemon-reload
-systemctl enable --now containerd
+systemctl restart containerd
 `))
 
 	containerdAmzn2Template = template.Must(template.New("containerd-yum-amzn2").Parse(`
@@ -123,7 +118,7 @@ runtime-endpoint: unix:///run/containerd/containerd.sock
 EOF
 
 yum install -y \
-	containerd-{{ .ContainerdVersion }}* \
+	containerd-{{ .ContainerdVersion }} \
 	yum-plugin-versionlock
 yum versionlock add containerd
 
@@ -151,7 +146,7 @@ Restart=always
 EnvironmentFile=-/etc/environment
 EOF
 
-yum install -y containerd.io-{{ .ContainerdVersion }}* yum-plugin-versionlock
+yum install -y containerd.io-{{ .ContainerdVersion }} yum-plugin-versionlock
 yum versionlock add containerd.io
 
 systemctl daemon-reload
@@ -175,7 +170,7 @@ Restart=always
 EnvironmentFile=-/etc/environment
 EOF
 
-apt-get install -y --allow-downgrades containerd.io={{ .ContainerdVersion }}*
+apt-get install -y --allow-downgrades containerd.io={{ .ContainerdVersion }}
 apt-mark hold containerd.io
 
 systemctl daemon-reload

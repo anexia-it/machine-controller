@@ -41,7 +41,6 @@ import (
 	"github.com/kubermatic/machine-controller/pkg/health"
 	machinesv1alpha1 "github.com/kubermatic/machine-controller/pkg/machines/v1alpha1"
 	"github.com/kubermatic/machine-controller/pkg/node"
-	osmv1alpha1 "k8c.io/operating-system-manager/pkg/crd/osm/v1alpha1"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -69,8 +68,11 @@ var (
 	bootstrapTokenServiceAccountName string
 	skipEvictionAfter                time.Duration
 	caBundleFile                     string
+	enableLeaderElection             bool
+	leaderElectionNamespace          string
 
-	useOSM bool
+	useOSM               bool
+	useExternalBootstrap bool
 
 	nodeCSRApprover                   bool
 	nodeHTTPProxy                     string
@@ -82,12 +84,14 @@ var (
 	podCIDR                           string
 	nodePortRange                     string
 	nodeRegistryCredentialsSecret     string
+	nodeContainerdVersion             string
 	nodeContainerdRegistryMirrors     = containerruntime.RegistryMirrorsFlags{}
 	overrideBootstrapKubeletAPIServer string
 )
 
 const (
 	defaultLeaderElectionNamespace = "kube-system"
+	defaultLeaderElectionID        = "machine-controller"
 )
 
 // controllerRunOptions holds data that are required to create and run machine controller.
@@ -126,7 +130,8 @@ type controllerRunOptions struct {
 
 	node machinecontroller.NodeSettings
 
-	useOSM bool
+	// Enable external bootstrap management by consuming secrets that are used to configure an instance's user-data.
+	useExternalBootstrap bool
 
 	// A port range to reserve for services with NodePort visibility.
 	nodePortRange string
@@ -152,6 +157,9 @@ func main() {
 	flag.StringVar(&healthProbeAddress, "health-probe-address", "127.0.0.1:8085", "The address on which the liveness check on /healthz and readiness check on /readyz will be available")
 	flag.StringVar(&metricsAddress, "metrics-address", "127.0.0.1:8080", "The address on which Prometheus metrics will be available under /metrics")
 	flag.StringVar(&name, "name", "", "When set, the controller will only process machines with the label \"machine.k8s.io/controller\": name")
+	flag.BoolVar(&enableLeaderElection, "enable-leader-election", true, "Enable leader election for machine-controller. Enabling this will ensure there is only one active instance.")
+	flag.StringVar(&leaderElectionNamespace, "leader-election-namespace", "kube-system", "Namespace to use for leader election.")
+
 	flag.StringVar(&joinClusterTimeout, "join-cluster-timeout", "", "when set, machines that have an owner and do not join the cluster within the configured duration will be deleted, so the owner re-creates them")
 	flag.StringVar(&bootstrapTokenServiceAccountName, "bootstrap-token-service-account-name", "", "When set use the service account token from this SA as bootstrap token instead of creating a temporary one. Passed in namespace/name format")
 	flag.BoolVar(&profiling, "enable-profiling", false, "when set, enables the endpoints on the http server under /debug/pprof/")
@@ -163,13 +171,15 @@ func main() {
 	flag.StringVar(&nodePauseImage, "node-pause-image", "", "Image for the pause container including tag. If not set, the kubelet default will be used: https://kubernetes.io/docs/reference/command-line-tools-reference/kubelet/")
 	flag.String("node-kubelet-repository", "quay.io/kubermatic/kubelet", "[NO-OP] Repository for the kubelet container. Has no effects.")
 	flag.StringVar(&nodeContainerRuntime, "node-container-runtime", "docker", "container-runtime to deploy")
+	flag.StringVar(&nodeContainerdVersion, "node-containerd-version", "", "version of containerd to deploy")
 	flag.Var(&nodeContainerdRegistryMirrors, "node-containerd-registry-mirrors", "Configure registry mirrors endpoints. Can be used multiple times to specify multiple mirrors")
 	flag.StringVar(&caBundleFile, "ca-bundle", "", "path to a file containing all PEM-encoded CA certificates (will be used instead of the host's certificates if set)")
 	flag.BoolVar(&nodeCSRApprover, "node-csr-approver", true, "Enable NodeCSRApprover controller to automatically approve node serving certificate requests")
 	flag.StringVar(&podCIDR, "pod-cidr", "172.25.0.0/16", "WARNING: flag is unused, kept only for backwards compatibility")
 	flag.StringVar(&nodePortRange, "node-port-range", "30000-32767", "A port range to reserve for services with NodePort visibility")
-	flag.StringVar(&nodeRegistryCredentialsSecret, "node-registry-credentials-secret", "", "A Secret object reference, that contains auth info for image registry in namespace/secret-name form, example: kube-system/registry-credentials. See doc at https://github.com/kubermaric/machine-controller/blob/master/docs/registry-authentication.md")
-	flag.BoolVar(&useOSM, "use-osm", false, "use osm controller for node bootstrap")
+	flag.StringVar(&nodeRegistryCredentialsSecret, "node-registry-credentials-secret", "", "A Secret object reference, that contains auth info for image registry in namespace/secret-name form, example: kube-system/registry-credentials. See doc at https://github.com/kubermaric/machine-controller/blob/main/docs/registry-authentication.md")
+	flag.BoolVar(&useOSM, "use-osm", false, "DEPRECATED: use osm controller for node bootstrap [use use-external-bootstrap instead]")
+	flag.BoolVar(&useExternalBootstrap, "use-external-bootstrap", false, "use an external bootstrap provider for instance user-data (e.g. operating-system-manager, also known as OSM)")
 	flag.StringVar(&overrideBootstrapKubeletAPIServer, "override-bootstrap-kubelet-apiserver", "", "Override for the API server address used in worker nodes bootstrap-kubelet.conf")
 
 	flag.Parse()
@@ -199,11 +209,6 @@ func main() {
 	}
 	if err := clusterv1alpha1.AddToScheme(scheme.Scheme); err != nil {
 		klog.Fatalf("failed to add clusterv1alpha1 api to scheme: %v", err)
-	}
-
-	// needed for OSM
-	if err := osmv1alpha1.AddToScheme(scheme.Scheme); err != nil {
-		klog.Fatalf("failed to add osmv1alpha1 api to scheme: %v", err)
 	}
 
 	cfg, err := clientcmd.BuildConfigFromFlags(masterURL, kubeconfig)
@@ -237,6 +242,7 @@ func main() {
 
 	containerRuntimeOpts := containerruntime.Opts{
 		ContainerRuntime:          nodeContainerRuntime,
+		ContainerdVersion:         nodeContainerdVersion,
 		ContainerdRegistryMirrors: nodeContainerdRegistryMirrors,
 		InsecureRegistries:        nodeInsecureRegistries,
 		PauseImage:                nodePauseImage,
@@ -265,7 +271,7 @@ func main() {
 			RegistryCredentialsSecretRef: nodeRegistryCredentialsSecret,
 			ContainerRuntime:             containerRuntimeConfig,
 		},
-		useOSM:                            useOSM,
+		useExternalBootstrap:              useExternalBootstrap || useOSM,
 		nodePortRange:                     nodePortRange,
 		overrideBootstrapKubeletAPIServer: overrideBootstrapKubeletAPIServer,
 	}
@@ -303,11 +309,16 @@ func main() {
 }
 
 func createManager(syncPeriod time.Duration, options controllerRunOptions) (manager.Manager, error) {
+	namespace := leaderElectionNamespace
+	if namespace == "" {
+		namespace = defaultLeaderElectionNamespace
+	}
+
 	mgr, err := manager.New(options.cfg, manager.Options{
 		SyncPeriod:              &syncPeriod,
-		LeaderElection:          true,
-		LeaderElectionID:        "machine-controller",
-		LeaderElectionNamespace: defaultLeaderElectionNamespace,
+		LeaderElection:          enableLeaderElection,
+		LeaderElectionID:        defaultLeaderElectionID,
+		LeaderElectionNamespace: namespace,
 		HealthProbeBindAddress:  healthProbeAddress,
 		MetricsBindAddress:      metricsAddress,
 	})
@@ -398,7 +409,7 @@ func (bs *controllerBootstrap) Start(ctx context.Context) error {
 		bs.opt.bootstrapTokenServiceAccountName,
 		bs.opt.skipEvictionAfter,
 		bs.opt.node,
-		bs.opt.useOSM,
+		bs.opt.useExternalBootstrap,
 		bs.opt.nodePortRange,
 		bs.opt.overrideBootstrapKubeletAPIServer,
 	); err != nil {

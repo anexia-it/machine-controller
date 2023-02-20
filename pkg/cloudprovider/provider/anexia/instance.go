@@ -17,6 +17,8 @@ limitations under the License.
 package anexia
 
 import (
+	"net"
+
 	"go.anx.io/go-anxcloud/pkg/vsphere/info"
 
 	"github.com/kubermatic/machine-controller/pkg/cloudprovider/instance"
@@ -26,7 +28,9 @@ import (
 )
 
 type anexiaInstance struct {
-	info *info.Info
+	isCreating        bool
+	info              *info.Info
+	reservedAddresses []string
 }
 
 func (ai *anexiaInstance) Name() string {
@@ -45,33 +49,47 @@ func (ai *anexiaInstance) ID() string {
 	return ai.info.Identifier
 }
 
-// TODO(xmudrii): Implement this.
 func (ai *anexiaInstance) ProviderID() string {
-	return ""
+	return ai.ID()
 }
 
 func (ai *anexiaInstance) Addresses() map[string]v1.NodeAddressType {
 	addresses := map[string]v1.NodeAddressType{}
 
-	if ai.info == nil {
-		return addresses
+	if ai.reservedAddresses != nil {
+		for _, reservedIP := range ai.reservedAddresses {
+			addresses[reservedIP] = v1.NodeExternalIP
+		}
 	}
 
-	for _, network := range ai.info.Network {
-		for _, ip := range network.IPv4 {
-			addresses[ip] = v1.NodeExternalIP
+	if ai.info != nil {
+		for _, network := range ai.info.Network {
+			for _, ip := range network.IPv4 {
+				addresses[ip] = v1.NodeExternalIP
+			}
+			for _, ip := range network.IPv6 {
+				addresses[ip] = v1.NodeExternalIP
+			}
 		}
-		for _, ip := range network.IPv6 {
-			addresses[ip] = v1.NodeExternalIP
-		}
+	}
 
-		// TODO mark RFC1918 and RFC4193 addresses as internal
+	for ip := range addresses {
+		parsed := net.ParseIP(ip)
+		if parsed.IsPrivate() {
+			addresses[ip] = v1.NodeInternalIP
+		} else {
+			addresses[ip] = v1.NodeExternalIP
+		}
 	}
 
 	return addresses
 }
 
 func (ai *anexiaInstance) Status() instance.Status {
+	if ai.isCreating {
+		return instance.StatusCreating
+	}
+
 	if ai.info != nil {
 		if ai.info.Status == anxtypes.MachinePoweredOn {
 			return instance.StatusRunning

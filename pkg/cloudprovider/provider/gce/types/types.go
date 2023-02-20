@@ -30,6 +30,7 @@ import (
 // CloudProviderSpec contains the specification of the cloud provider taken
 // from the provider configuration.
 type CloudProviderSpec struct {
+	// ServiceAccount must be base64-encoded.
 	ServiceAccount               providerconfigtypes.ConfigVarString  `json:"serviceAccount,omitempty"`
 	Zone                         providerconfigtypes.ConfigVarString  `json:"zone"`
 	MachineType                  providerconfigtypes.ConfigVarString  `json:"machineType"`
@@ -47,6 +48,9 @@ type CloudProviderSpec struct {
 	Regional                     providerconfigtypes.ConfigVarBool    `json:"regional"`
 	CustomImage                  providerconfigtypes.ConfigVarString  `json:"customImage,omitempty"`
 	DisableMachineServiceAccount providerconfigtypes.ConfigVarBool    `json:"disableMachineServiceAccount,omitempty"`
+	EnableNestedVirtualization   providerconfigtypes.ConfigVarBool    `json:"enableNestedVirtualization,omitempty"`
+	MinCPUPlatform               providerconfigtypes.ConfigVarString  `json:"minCPUPlatform,omitempty"`
+	GuestOSFeatures              []string                             `json:"guestOSFeatures,omitempty"`
 }
 
 // UpdateProviderSpec updates the given provider spec with changed

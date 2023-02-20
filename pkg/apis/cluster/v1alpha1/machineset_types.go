@@ -30,7 +30,7 @@ import (
 // +genclient
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
-/// [MachineSet]
+// / [MachineSet]
 // MachineSet ensures that a specified number of machines replicas are running at any given time.
 // +k8s:openapi-gen=true
 // +kubebuilder:resource:shortName=ms
@@ -46,7 +46,7 @@ type MachineSet struct {
 
 /// [MachineSet]
 
-/// [MachineSetSpec]
+// / [MachineSetSpec]
 // MachineSetSpec defines the desired state of MachineSet.
 type MachineSetSpec struct {
 	// Replicas is the number of desired replicas.
@@ -103,7 +103,7 @@ const (
 
 /// [MachineSetSpec] // doxygen marker
 
-/// [MachineTemplateSpec] // doxygen marker
+// / [MachineTemplateSpec] // doxygen marker
 // MachineTemplateSpec describes the data needed to create a Machine from a template.
 type MachineTemplateSpec struct {
 	// Standard object's metadata.
@@ -119,7 +119,7 @@ type MachineTemplateSpec struct {
 
 /// [MachineTemplateSpec]
 
-/// [MachineSetStatus]
+// / [MachineSetStatus]
 // MachineSetStatus defines the observed state of MachineSet.
 type MachineSetStatus struct {
 	// Replicas is the most recently observed number of replicas.
@@ -172,7 +172,7 @@ func (m *MachineSet) Validate() field.ErrorList {
 
 	// validate spec.selector and spec.template.labels
 	fldPath := field.NewPath("spec")
-	errors = append(errors, metav1validation.ValidateLabelSelector(&m.Spec.Selector, fldPath.Child("selector"))...)
+	errors = append(errors, metav1validation.ValidateLabelSelector(&m.Spec.Selector, metav1validation.LabelSelectorValidationOptions{}, fldPath.Child("selector"))...)
 	if len(m.Spec.Selector.MatchLabels)+len(m.Spec.Selector.MatchExpressions) == 0 {
 		errors = append(errors, field.Invalid(fldPath.Child("selector"), m.Spec.Selector, "empty selector is not valid for MachineSet."))
 	}

@@ -442,7 +442,7 @@ func (p *provider) AddDefaults(spec clusterv1alpha1.MachineSpec) (clusterv1alpha
 }
 
 func (p *provider) Validate(_ context.Context, spec clusterv1alpha1.MachineSpec) error {
-	c, pc, _, err := p.getConfig(spec.ProviderSpec)
+	c, _, _, err := p.getConfig(spec.ProviderSpec)
 	if err != nil {
 		return fmt.Errorf("failed to parse config: %w", err)
 	}
@@ -536,9 +536,6 @@ func (p *provider) Validate(_ context.Context, spec clusterv1alpha1.MachineSpec)
 
 	if _, err := getAvailabilityZone(computeClient, c); err != nil {
 		return fmt.Errorf("failed to get availability zone %q: %w", c.AvailabilityZone, err)
-	}
-	if pc.OperatingSystem == providerconfigtypes.OperatingSystemSLES {
-		return fmt.Errorf("invalid/not supported operating system specified %q: %w", pc.OperatingSystem, providerconfigtypes.ErrOSNotSupported)
 	}
 	// Optional fields.
 	if len(c.SecurityGroups) != 0 {
@@ -763,7 +760,7 @@ func (p *provider) Cleanup(ctx context.Context, machine *clusterv1alpha1.Machine
 		return false, osErrorToTerminalError(err, "failed to get compute client")
 	}
 
-	if err := osservers.Delete(computeClient, instance.ID()).ExtractErr(); err != nil && err.Error() != "Resource not found" {
+	if err := osservers.Delete(computeClient, instance.ID()).ExtractErr(); err != nil && !errors.Is(err, &gophercloud.ErrDefault404{}) {
 		return false, osErrorToTerminalError(err, "failed to delete instance")
 	}
 
@@ -1034,7 +1031,7 @@ func (p *provider) cleanupFloatingIP(machine *clusterv1alpha1.Machine, updater c
 	if err != nil {
 		return fmt.Errorf("failed to create the networkv2 client for region %s: %w", c.Region, err)
 	}
-	if err := osfloatingips.Delete(netClient, floatingIPID).ExtractErr(); err != nil && err.Error() != "Resource not found" {
+	if err := osfloatingips.Delete(netClient, floatingIPID).ExtractErr(); err != nil && !errors.Is(err, &gophercloud.ErrDefault404{}) {
 		return fmt.Errorf("failed to delete floating ip %s: %w", floatingIPID, err)
 	}
 	if err := updater(machine, func(m *clusterv1alpha1.Machine) {

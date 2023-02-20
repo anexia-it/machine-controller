@@ -55,6 +55,12 @@ func testProviderSpec() map[string]interface{} {
 			},
 			"zone":                         "europe-west2-a",
 			"disableMachineServiceAccount": false,
+			"enableNestedVirtualization":   true,
+			"minCPUPlatform":               "Intel Haswell",
+			"guestOSFeatures": []string{
+				"VIRTIO_SCSI_MULTIQUEUE",
+				"GVNIC",
+			},
 		},
 		"operatingSystem": "ubuntu",
 		"operatingSystemSpec": map[string]interface{}{

@@ -45,10 +45,11 @@ type Config struct {
 	AllowInsecure bool
 	ProxyURL      string
 
-	ClusterName string
-	ProjectName string
-	SubnetName  string
-	ImageName   string
+	ClusterName           string
+	ProjectName           string
+	SubnetName            string
+	AdditionalSubnetNames []string
+	ImageName             string
 
 	Categories map[string]string
 
@@ -85,9 +86,8 @@ func (nutanixServer Server) ID() string {
 	return nutanixServer.id
 }
 
-// NB: Nutanix doesn't have a CCM.
 func (nutanixServer Server) ProviderID() string {
-	return ""
+	return fmt.Sprintf("nutanix://%s", nutanixServer.ID())
 }
 
 func (nutanixServer Server) Addresses() map[string]corev1.NodeAddressType {
@@ -181,6 +181,8 @@ func (p *provider) getConfig(provSpec clusterv1alpha1.ProviderSpec) (*Config, *p
 		return nil, nil, nil, err
 	}
 
+	c.AdditionalSubnetNames = append(c.AdditionalSubnetNames, rawConfig.AdditionalSubnetNames...)
+
 	c.ImageName, err = p.configVarResolver.GetConfigVarStringValue(rawConfig.ImageName)
 	if err != nil {
 		return nil, nil, nil, err
@@ -225,6 +227,12 @@ func (p *provider) Validate(ctx context.Context, spec clusterv1alpha1.MachineSpe
 
 	if _, err := getSubnetByName(ctx, client, config.SubnetName, *cluster.Metadata.UUID); err != nil {
 		return fmt.Errorf("failed to get subnet: %w", err)
+	}
+
+	for _, subnet := range config.AdditionalSubnetNames {
+		if _, err := getSubnetByName(ctx, client, subnet, *cluster.Metadata.UUID); err != nil {
+			return fmt.Errorf("failed to get subnet: %w", err)
+		}
 	}
 
 	image, err := getImageByName(ctx, client, config.ImageName)

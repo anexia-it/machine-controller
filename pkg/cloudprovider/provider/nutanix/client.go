@@ -25,8 +25,8 @@ import (
 	"strings"
 	"time"
 
-	nutanixclient "github.com/embik/nutanix-client-go/pkg/client"
-	nutanixv3 "github.com/embik/nutanix-client-go/pkg/client/v3"
+	nutanixclient "github.com/nutanix-cloud-native/prism-go-client"
+	nutanixv3 "github.com/nutanix-cloud-native/prism-go-client/v3"
 
 	"github.com/kubermatic/machine-controller/pkg/apis/cluster/common"
 	cloudprovidererrors "github.com/kubermatic/machine-controller/pkg/cloudprovider/errors"
@@ -104,6 +104,29 @@ func createVM(ctx context.Context, client *ClientSet, name string, conf Config, 
 		return nil, err
 	}
 
+	nicList := []*nutanixv3.VMNic{
+		{
+			SubnetReference: &nutanixv3.Reference{
+				Kind: pointer.String(nutanixtypes.SubnetKind),
+				UUID: subnet.Metadata.UUID,
+			},
+		},
+	}
+
+	for _, subnet := range conf.AdditionalSubnetNames {
+		additionalSubnet, err := getSubnetByName(ctx, client, subnet, *cluster.Metadata.UUID)
+		if err != nil {
+			return nil, err
+		}
+		additionalSubnetNic := &nutanixv3.VMNic{
+			SubnetReference: &nutanixv3.Reference{
+				Kind: pointer.String(nutanixtypes.SubnetKind),
+				UUID: additionalSubnet.Metadata.UUID,
+			},
+		}
+		nicList = append(nicList, additionalSubnetNic)
+	}
+
 	image, err := getImageByName(ctx, client, conf.ImageName)
 	if err != nil {
 		return nil, err
@@ -127,14 +150,7 @@ func createVM(ctx context.Context, client *ClientSet, name string, conf Config, 
 		PowerState:    pointer.String("ON"),
 		NumSockets:    pointer.Int64(conf.CPUs),
 		MemorySizeMib: pointer.Int64(conf.MemoryMB),
-		NicList: []*nutanixv3.VMNic{
-			{
-				SubnetReference: &nutanixv3.Reference{
-					Kind: pointer.String(nutanixtypes.SubnetKind),
-					UUID: subnet.Metadata.UUID,
-				},
-			},
-		},
+		NicList:       nicList,
 		DiskList: []*nutanixv3.VMDisk{
 			{
 				DeviceProperties: &nutanixv3.VMDiskDeviceProperties{
@@ -226,7 +242,7 @@ func createVM(ctx context.Context, client *ClientSet, name string, conf Config, 
 
 func getSubnetByName(ctx context.Context, client *ClientSet, name, clusterID string) (*nutanixv3.SubnetIntentResponse, error) {
 	filter := fmt.Sprintf("name==%s", name)
-	subnets, err := client.Prism.V3.ListAllSubnet(ctx, filter)
+	subnets, err := client.Prism.V3.ListAllSubnet(ctx, filter, nil)
 
 	if err != nil {
 		return nil, wrapNutanixError(err)

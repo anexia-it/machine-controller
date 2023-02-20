@@ -18,7 +18,7 @@ postsubmits:
     decorate: true
     clone_uri: "ssh://git@github.com/kubermatic/machine-controller.git"
     branches:
-      - ^master$
+      - ^main$
       # Match on tags
       - ^v\d+\.\d+\.\d+.*
     labels:
@@ -26,7 +26,7 @@ postsubmits:
       preset-goproxy: "true"
     spec:
       containers:
-        - image: quay.io/kubermatic/build:go-1.18-node-16-kind-0.14-9
+        - image: quay.io/kubermatic/build:go-1.19-node-18-kind-0.17-5
           command:
             - /bin/bash
             - -c
@@ -49,12 +49,12 @@ postsubmits:
     decorate: true
     clone_uri: "ssh://git@github.com/kubermatic/machine-controller.git"
     branches:
-      - ^master$
+      - ^main$
     labels:
       preset-goproxy: "true"
     spec:
       containers:
-        - image: quay.io/kubermatic/build:go-1.18-node-16-kind-0.14-9
+        - image: quay.io/kubermatic/build:go-1.19-node-18-kind-0.17-5
           command:
             - "./hack/ci/upload-gocache.sh"
           resources:

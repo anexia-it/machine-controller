@@ -24,6 +24,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2021-11-01/compute"
 	"github.com/Azure/azure-sdk-for-go/services/network/mgmt/2021-05-01/network"
@@ -102,7 +104,9 @@ type config struct {
 	DataDiskSKU  *compute.StorageAccountTypes
 
 	AssignPublicIP              bool
+	PublicIPSKU                 *network.PublicIPAddressSkuName
 	EnableAcceleratedNetworking *bool
+	EnableBootDiagnostics       bool
 	Tags                        map[string]string
 }
 
@@ -145,8 +149,8 @@ var imageReferences = map[providerconfigtypes.OperatingSystem]compute.ImageRefer
 	},
 	providerconfigtypes.OperatingSystemUbuntu: {
 		Publisher: to.StringPtr("Canonical"),
-		Offer:     to.StringPtr("0001-com-ubuntu-server-focal"),
-		Sku:       to.StringPtr("20_04-lts"),
+		Offer:     to.StringPtr("0001-com-ubuntu-server-jammy"),
+		Sku:       to.StringPtr("22_04-lts"),
 		Version:   to.StringPtr("latest"),
 	},
 	providerconfigtypes.OperatingSystemRHEL: {
@@ -159,7 +163,7 @@ var imageReferences = map[providerconfigtypes.OperatingSystem]compute.ImageRefer
 		Publisher: to.StringPtr("kinvolk"),
 		Offer:     to.StringPtr("flatcar-container-linux"),
 		Sku:       to.StringPtr("stable"),
-		Version:   to.StringPtr("2905.2.5"),
+		Version:   to.StringPtr("3374.2.0"),
 	},
 	providerconfigtypes.OperatingSystemRockyLinux: {
 		Publisher: to.StringPtr("procomputers"),
@@ -171,19 +175,19 @@ var imageReferences = map[providerconfigtypes.OperatingSystem]compute.ImageRefer
 
 var osPlans = map[providerconfigtypes.OperatingSystem]*compute.Plan{
 	providerconfigtypes.OperatingSystemFlatcar: {
-		Name:      pointer.StringPtr("stable"),
-		Publisher: pointer.StringPtr("kinvolk"),
-		Product:   pointer.StringPtr("flatcar-container-linux"),
+		Name:      pointer.String("stable"),
+		Publisher: pointer.String("kinvolk"),
+		Product:   pointer.String("flatcar-container-linux"),
 	},
 	providerconfigtypes.OperatingSystemRHEL: {
-		Name:      pointer.StringPtr("rhel-lvm85"),
-		Publisher: pointer.StringPtr("redhat"),
-		Product:   pointer.StringPtr("rhel-byos"),
+		Name:      pointer.String("rhel-lvm85"),
+		Publisher: pointer.String("redhat"),
+		Product:   pointer.String("rhel-byos"),
 	},
 	providerconfigtypes.OperatingSystemRockyLinux: {
-		Name:      pointer.StringPtr("rocky-linux-8-5"),
-		Publisher: pointer.StringPtr("procomputers"),
-		Product:   pointer.StringPtr("rocky-linux-8-5"),
+		Name:      pointer.String("rocky-linux-8-5"),
+		Publisher: pointer.String("procomputers"),
+		Product:   pointer.String("rocky-linux-8-5"),
 	},
 }
 
@@ -325,6 +329,10 @@ func (p *provider) getConfig(provSpec clusterv1alpha1.ProviderSpec) (*config, *p
 		return nil, nil, fmt.Errorf("failed to get the value of \"assignPublicIP\" field, error = %w", err)
 	}
 
+	if rawCfg.PublicIPSKU != nil {
+		c.PublicIPSKU = ipSkuPtr(*rawCfg.PublicIPSKU)
+	}
+
 	c.AssignAvailabilitySet = rawCfg.AssignAvailabilitySet
 	c.EnableAcceleratedNetworking = rawCfg.EnableAcceleratedNetworking
 
@@ -353,24 +361,28 @@ func (p *provider) getConfig(provSpec clusterv1alpha1.ProviderSpec) (*config, *p
 
 	if rawCfg.ImagePlan != nil && rawCfg.ImagePlan.Name != "" {
 		c.ImagePlan = &compute.Plan{
-			Name:      pointer.StringPtr(rawCfg.ImagePlan.Name),
-			Publisher: pointer.StringPtr(rawCfg.ImagePlan.Publisher),
-			Product:   pointer.StringPtr(rawCfg.ImagePlan.Product),
+			Name:      pointer.String(rawCfg.ImagePlan.Name),
+			Publisher: pointer.String(rawCfg.ImagePlan.Publisher),
+			Product:   pointer.String(rawCfg.ImagePlan.Product),
 		}
 	}
 
 	if rawCfg.ImageReference != nil {
 		c.ImageReference = &compute.ImageReference{
-			Publisher: pointer.StringPtr(rawCfg.ImageReference.Publisher),
-			Offer:     pointer.StringPtr(rawCfg.ImageReference.Offer),
-			Sku:       pointer.StringPtr(rawCfg.ImageReference.Sku),
-			Version:   pointer.StringPtr(rawCfg.ImageReference.Version),
+			Publisher: pointer.String(rawCfg.ImageReference.Publisher),
+			Offer:     pointer.String(rawCfg.ImageReference.Offer),
+			Sku:       pointer.String(rawCfg.ImageReference.Sku),
+			Version:   pointer.String(rawCfg.ImageReference.Version),
 		}
 	}
 
 	c.ImageID, err = p.configVarResolver.GetConfigVarStringValue(rawCfg.ImageID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get image id: %w", err)
+	}
+
+	if rawCfg.EnableBootDiagnostics != nil {
+		c.EnableBootDiagnostics = *rawCfg.EnableBootDiagnostics
 	}
 
 	return &c, pconfig, nil
@@ -449,7 +461,7 @@ func getNICIPAddresses(ctx context.Context, c *config, ipFamily util.IPFamily, i
 				ipAddresses[ip] = v1.NodeExternalIP
 			}
 
-			if ipFamily == util.DualStack || ipFamily == util.IPv6 {
+			if ipFamily.HasIPv6() {
 				publicIP6s, err := getIPAddressStrings(ctx, c, publicIPv6Name(ifaceName))
 				if err != nil {
 					return nil, fmt.Errorf("failed to retrieve IP string for IP %q: %w", name, err)
@@ -531,7 +543,7 @@ func getStorageProfile(config *config, providerCfg *providerconfigtypes.Config) 
 	}
 	if config.OSDiskSize != 0 {
 		sp.OsDisk = &compute.OSDisk{
-			DiskSizeGB:   pointer.Int32Ptr(config.OSDiskSize),
+			DiskSizeGB:   pointer.Int32(config.OSDiskSize),
 			CreateOption: compute.DiskCreateOptionTypesFromImage,
 		}
 
@@ -547,7 +559,7 @@ func getStorageProfile(config *config, providerCfg *providerconfigtypes.Config) 
 			{
 				// this should be in range 0-63 and should be unique per datadisk, since we have only one datadisk, this should be fine
 				Lun:          new(int32),
-				DiskSizeGB:   pointer.Int32Ptr(config.DataDiskSize),
+				DiskSizeGB:   pointer.Int32(config.DataDiskSize),
 				CreateOption: compute.DiskCreateOptionTypesEmpty,
 			},
 		}
@@ -583,7 +595,10 @@ func (p *provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine,
 
 	ipFamily := providerCfg.Network.GetIPFamily()
 	sku := network.PublicIPAddressSkuNameBasic
-	if ipFamily == util.DualStack {
+
+	if config.PublicIPSKU != nil {
+		sku = *config.PublicIPSKU
+	} else if ipFamily.IsDualstack() {
 		// 1. Cannot specify basic sku PublicIp for an IPv6 network interface ipConfiguration.
 		// 2. Different basic sku and standard sku public Ip resources in availability set is not allowed.
 		// 1 & 2 means we have to use standard sku in dual-stack configuration.
@@ -593,6 +608,7 @@ func (p *provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine,
 		// basic sku.
 		sku = network.PublicIPAddressSkuNameStandard
 	}
+
 	var publicIP, publicIPv6 *network.PublicIPAddress
 	if config.AssignPublicIP {
 		if err = data.Update(machine, func(updatedMachine *clusterv1alpha1.Machine) {
@@ -607,7 +623,7 @@ func (p *provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine,
 			return nil, fmt.Errorf("failed to create public IP: %w", err)
 		}
 
-		if ipFamily == util.DualStack {
+		if ipFamily.IsDualstack() {
 			publicIPv6, err = createOrUpdatePublicIPAddress(ctx, publicIPv6Name(ifaceName(machine)), network.IPVersionIPv6, sku, network.IPAllocationMethodStatic, machine.UID, config)
 			if err != nil {
 				return nil, fmt.Errorf("failed to create public IP: %w", err)
@@ -685,6 +701,14 @@ func (p *provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine,
 		// Azure expects the full path to the resource
 		asURI := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Compute/availabilitySets/%s", config.SubscriptionID, config.ResourceGroup, config.AvailabilitySet)
 		vmSpec.VirtualMachineProperties.AvailabilitySet = &compute.SubResource{ID: to.StringPtr(asURI)}
+	}
+
+	if config.EnableBootDiagnostics {
+		vmSpec.DiagnosticsProfile = &compute.DiagnosticsProfile{
+			BootDiagnostics: &compute.BootDiagnostics{
+				Enabled: pointer.Bool(config.EnableBootDiagnostics),
+			},
+		}
 	}
 
 	klog.Infof("Creating machine %q", machine.Name)
@@ -1026,14 +1050,31 @@ func (p *provider) Validate(ctx context.Context, spec clusterv1alpha1.MachineSpe
 	}
 
 	switch f := providerConfig.Network.GetIPFamily(); f {
-	case util.Unspecified, util.IPv4:
+	case util.IPFamilyUnspecified, util.IPFamilyIPv4:
 		//noop
-	case util.IPv6:
+	case util.IPFamilyIPv6:
 		return fmt.Errorf(util.ErrIPv6OnlyUnsupported)
-	case util.DualStack:
+	case util.IPFamilyIPv4IPv6, util.IPFamilyIPv6IPv4:
 		// validate
 	default:
 		return fmt.Errorf(util.ErrUnknownNetworkFamily, f)
+	}
+
+	if c.PublicIPSKU != nil {
+		valid := false
+		for _, sku := range network.PossiblePublicIPAddressSkuNameValues() {
+			if sku == *c.PublicIPSKU {
+				valid = true
+			}
+		}
+
+		if !valid {
+			return fmt.Errorf("unknown public IP address SKU: %s", *c.PublicIPSKU)
+		}
+
+		if providerConfig.Network.GetIPFamily().IsDualstack() && *c.PublicIPSKU == network.PublicIPAddressSkuNameBasic {
+			return fmt.Errorf("cannot use %s public IP address SKU with dualstack", network.PublicIPAddressSkuNameBasic)
+		}
 	}
 
 	vmClient, err := getVMClient(c)
@@ -1116,7 +1157,7 @@ func (p *provider) MigrateUID(ctx context.Context, machine *clusterv1alpha1.Mach
 	}
 
 	if kuberneteshelper.HasFinalizer(machine, finalizerNIC) {
-		_, err = createOrUpdateNetworkInterface(ctx, ifaceName(machine), newUID, config, publicIP, publicIPv6, util.Unspecified, config.EnableAcceleratedNetworking)
+		_, err = createOrUpdateNetworkInterface(ctx, ifaceName(machine), newUID, config, publicIP, publicIPv6, util.IPFamilyUnspecified, config.EnableAcceleratedNetworking)
 		if err != nil {
 			return fmt.Errorf("failed to update UID on main network interface: %w", err)
 		}
@@ -1192,6 +1233,21 @@ func getOSUsername(os providerconfigtypes.OperatingSystem) string {
 func storageTypePtr(storageType string) *compute.StorageAccountTypes {
 	storage := compute.StorageAccountTypes(storageType)
 	return &storage
+}
+
+func ipSkuPtr(ipSKU string) *network.PublicIPAddressSkuName {
+	// the correct Azure API representation is capitalized, so we do that even if the original input was all lowercase
+	sku := network.PublicIPAddressSkuName(upperFirst(ipSKU))
+	return &sku
+}
+
+func upperFirst(str string) string {
+	if str == "" {
+		return ""
+	}
+
+	r, n := utf8.DecodeRuneInString(str)
+	return string(unicode.ToUpper(r)) + str[n:]
 }
 
 // supportsDiskSKU validates some disk SKU types against the chosen VM SKU / VM type.

@@ -196,6 +196,7 @@ func (p *provider) getConfig(provSpec clusterv1alpha1.ProviderSpec) (*Config, *p
 	for _, tag := range rawConfig.Tags {
 		c.Tags = append(c.Tags, tags.Tag{
 			Description: tag.Description,
+			ID:          tag.ID,
 			Name:        tag.Name,
 			CategoryID:  tag.CategoryID,
 		})
@@ -205,13 +206,9 @@ func (p *provider) getConfig(provSpec clusterv1alpha1.ProviderSpec) (*Config, *p
 }
 
 func (p *provider) Validate(ctx context.Context, spec clusterv1alpha1.MachineSpec) error {
-	config, pc, _, err := p.getConfig(spec.ProviderSpec)
+	config, _, _, err := p.getConfig(spec.ProviderSpec)
 	if err != nil {
 		return fmt.Errorf("failed to get config: %w", err)
-	}
-
-	if pc.OperatingSystem == providerconfigtypes.OperatingSystemSLES {
-		return fmt.Errorf("invalid/not supported operating system specified %q: %w", pc.OperatingSystem, providerconfigtypes.ErrOSNotSupported)
 	}
 
 	session, err := NewSession(ctx, config)
@@ -229,8 +226,8 @@ func (p *provider) Validate(ctx context.Context, spec clusterv1alpha1.MachineSpe
 		tagManager := tags.NewManager(restAPISession.Client)
 		klog.V(3).Info("Found tags")
 		for _, tag := range config.Tags {
-			if tag.Name == "" {
-				return fmt.Errorf("one of the tags name is empty")
+			if tag.ID == "" && tag.Name == "" {
+				return fmt.Errorf("either tag id or name must be specified")
 			}
 			if tag.CategoryID == "" {
 				return fmt.Errorf("one of the tags category is empty")
@@ -338,8 +335,8 @@ func (p *provider) create(ctx context.Context, machine *clusterv1alpha1.Machine,
 		return nil, machineInvalidConfigurationTerminalError(fmt.Errorf("failed to create cloned vm: '%w'", err))
 	}
 
-	if err := createAndAttachTags(ctx, config, virtualMachine); err != nil {
-		return nil, fmt.Errorf("failed create and attach tags: %w", err)
+	if err := attachTags(ctx, config, virtualMachine); err != nil {
+		return nil, fmt.Errorf("failed to attach tags: %w", err)
 	}
 
 	if pc.OperatingSystem != providerconfigtypes.OperatingSystemFlatcar {
@@ -400,7 +397,7 @@ func (p *provider) Cleanup(ctx context.Context, machine *clusterv1alpha1.Machine
 		return false, fmt.Errorf("failed to get instance from vSphere: %w", err)
 	}
 
-	if err := deleteTags(ctx, config, virtualMachine); err != nil {
+	if err := detachTags(ctx, config, virtualMachine); err != nil {
 		return false, fmt.Errorf("failed to delete tags: %w", err)
 	}
 
@@ -591,7 +588,7 @@ func (p *provider) GetCloudConfig(spec clusterv1alpha1.MachineSpec) (config stri
 		},
 	}
 
-	s, err := vspheretypes.CloudConfigToString(cc)
+	s, err := cc.String()
 	if err != nil {
 		return "", "", fmt.Errorf("failed to convert the cloud-config to string: %w", err)
 	}

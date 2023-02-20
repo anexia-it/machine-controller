@@ -14,10 +14,7 @@
 
 presubmits:
   - name: pull-machine-controller-e2e-nutanix
-    optional: true
-    always_run: false
-    # TODO uncomment this when Nutanix is in a working condition
-    #run_if_changed: "(pkg/cloudprovider/provider/nutanix/)"
+    run_if_changed: "(pkg/cloudprovider/provider/nutanix/)"
     decorate: true
     clone_uri: "ssh://git@github.com/kubermatic/machine-controller.git"
     labels:
@@ -30,16 +27,19 @@ presubmits:
       preset-kubeconfig-ci: "true"
     spec:
       containers:
-        - image: quay.io/kubermatic/build:go-1.18-node-16-kind-0.14-9
+        - image: quay.io/kubermatic/build:go-1.19-node-18-kind-0.17-5
           command:
             - "./hack/ci/run-e2e-tests.sh"
           args:
             - "TestNutanixProvisioningE2E"
+          env:
+            - name: CLOUD_PROVIDER
+              value: nutanix
           securityContext:
             privileged: true
           resources:
             requests:
-              memory: 6Gi
+              memory: 7Gi
               cpu: 2
             limits:
-              memory: 6Gi
+              memory: 7Gi

@@ -33,23 +33,22 @@ var (
 	scenarios = buildScenarios()
 
 	versions = []*semver.Version{
-		semver.MustParse("v1.22.7"),
-		semver.MustParse("v1.23.5"),
-		semver.MustParse("v1.24.0"),
+		semver.MustParse("v1.24.10"),
+		semver.MustParse("v1.25.6"),
+		semver.MustParse("v1.26.1"),
 	}
 
 	operatingSystems = []providerconfigtypes.OperatingSystem{
 		providerconfigtypes.OperatingSystemUbuntu,
 		providerconfigtypes.OperatingSystemCentOS,
 		providerconfigtypes.OperatingSystemAmazonLinux2,
-		providerconfigtypes.OperatingSystemSLES,
 		providerconfigtypes.OperatingSystemRHEL,
 		providerconfigtypes.OperatingSystemFlatcar,
 		providerconfigtypes.OperatingSystemRockyLinux,
 	}
 
 	openStackImages = map[string]string{
-		string(providerconfigtypes.OperatingSystemUbuntu):     "machine-controller-e2e-ubuntu-20-04",
+		string(providerconfigtypes.OperatingSystemUbuntu):     "kubermatic-ubuntu",
 		string(providerconfigtypes.OperatingSystemCentOS):     "machine-controller-e2e-centos",
 		string(providerconfigtypes.OperatingSystemRHEL):       "machine-controller-e2e-rhel-8-5",
 		string(providerconfigtypes.OperatingSystemFlatcar):    "machine-controller-e2e-flatcar-stable-2983",
@@ -57,11 +56,19 @@ var (
 	}
 
 	vSphereOSImageTemplates = map[string]string{
-		string(providerconfigtypes.OperatingSystemCentOS):     "machine-controller-e2e-centos",
-		string(providerconfigtypes.OperatingSystemFlatcar):    "machine-controller-e2e-flatcar",
-		string(providerconfigtypes.OperatingSystemRHEL):       "machine-controller-e2e-rhel",
-		string(providerconfigtypes.OperatingSystemRockyLinux): "machine-controller-e2e-rockylinux",
-		string(providerconfigtypes.OperatingSystemUbuntu):     "machine-controller-e2e-ubuntu",
+		string(providerconfigtypes.OperatingSystemCentOS):     "kkp-centos-7",
+		string(providerconfigtypes.OperatingSystemFlatcar):    "kkp-flatcar-3139.2.0",
+		string(providerconfigtypes.OperatingSystemRHEL):       "kkp-rhel-8.6",
+		string(providerconfigtypes.OperatingSystemRockyLinux): "kkp-rockylinux-8.5",
+		string(providerconfigtypes.OperatingSystemUbuntu):     "kkp-ubuntu-22.04",
+	}
+
+	kubevirtImages = map[string]string{
+		string(providerconfigtypes.OperatingSystemCentOS):     "centos",
+		string(providerconfigtypes.OperatingSystemFlatcar):    "flatcar",
+		string(providerconfigtypes.OperatingSystemRHEL):       "rhel",
+		string(providerconfigtypes.OperatingSystemRockyLinux): "rockylinux",
+		string(providerconfigtypes.OperatingSystemUbuntu):     "ubuntu-22.04",
 	}
 )
 
@@ -237,6 +244,9 @@ func testScenario(t *testing.T, testCase scenario, cloudProvider string, testPar
 	// only use by vSphere scenarios
 	scenarioParams = append(scenarioParams, fmt.Sprintf("<< OS_Image_Template >>=%s", vSphereOSImageTemplates[testCase.osName]))
 
+	// only use by KubeVirt scenarios
+	scenarioParams = append(scenarioParams, fmt.Sprintf("<< KUBEVIRT_OS_IMAGE >>=%s", kubevirtImages[testCase.osName]))
+
 	// default kubeconfig to the hardcoded path at which `make e2e-cluster` creates its new kubeconfig
 	gopath := os.Getenv("GOPATH")
 	projectDir := filepath.Join(gopath, "src/github.com/kubermatic/machine-controller")
@@ -268,7 +278,7 @@ func buildScenarios() []scenario {
 		for _, operatingSystem := range operatingSystems {
 			s := scenario{
 				name:              fmt.Sprintf("%s-%s", operatingSystem, version),
-				containerRuntime:  "docker",
+				containerRuntime:  "containerd",
 				kubernetesVersion: version.String(),
 				osName:            string(operatingSystem),
 				executor:          verifyCreateAndDelete,

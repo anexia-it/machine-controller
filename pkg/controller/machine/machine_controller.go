@@ -31,6 +31,7 @@ import (
 	"github.com/kubermatic/machine-controller/pkg/apis/cluster/common"
 	clusterv1alpha1 "github.com/kubermatic/machine-controller/pkg/apis/cluster/v1alpha1"
 	"github.com/kubermatic/machine-controller/pkg/apis/plugin"
+	"github.com/kubermatic/machine-controller/pkg/bootstrap"
 	"github.com/kubermatic/machine-controller/pkg/cloudprovider"
 	cloudprovidererrors "github.com/kubermatic/machine-controller/pkg/cloudprovider/errors"
 	"github.com/kubermatic/machine-controller/pkg/cloudprovider/instance"
@@ -47,8 +48,6 @@ import (
 	userdatamanager "github.com/kubermatic/machine-controller/pkg/userdata/manager"
 	userdataplugin "github.com/kubermatic/machine-controller/pkg/userdata/plugin"
 	"github.com/kubermatic/machine-controller/pkg/userdata/rhel"
-	"k8c.io/operating-system-manager/pkg/controllers/osc"
-	osmresources "k8c.io/operating-system-manager/pkg/controllers/osc/resources"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -119,7 +118,7 @@ type Reconciler struct {
 	redhatSubscriptionManager        rhsm.RedHatSubscriptionManager
 	satelliteSubscriptionManager     rhsm.SatelliteSubscriptionManager
 
-	useOSM                            bool
+	useExternalBootstrap              bool
 	nodePortRange                     string
 	overrideBootstrapKubeletAPIServer string
 }
@@ -177,7 +176,7 @@ func Add(
 	bootstrapTokenServiceAccountName *types.NamespacedName,
 	skipEvictionAfter time.Duration,
 	nodeSettings NodeSettings,
-	useOSM bool,
+	useExternalBootstrap bool,
 	nodePortRange string,
 	overrideBootstrapKubeletAPIServer string,
 ) error {
@@ -196,7 +195,7 @@ func Add(
 		redhatSubscriptionManager:        rhsm.NewRedHatSubscriptionManager(),
 		satelliteSubscriptionManager:     rhsm.NewSatelliteSubscriptionManager(),
 
-		useOSM:                            useOSM,
+		useExternalBootstrap:              useExternalBootstrap,
 		nodePortRange:                     nodePortRange,
 		overrideBootstrapKubeletAPIServer: overrideBootstrapKubeletAPIServer,
 	}
@@ -686,6 +685,7 @@ func (r *Reconciler) deleteCloudProviderInstance(ctx context.Context, prov cloud
 		if rhelConfig.RHELUseSatelliteServer {
 			if kuberneteshelper.HasFinalizer(machine, rhsm.RedhatSubscriptionFinalizer) {
 				err = r.satelliteSubscriptionManager.DeleteSatelliteHost(
+					ctx,
 					machineName,
 					rhelConfig.RHELSubscriptionManagerUser,
 					rhelConfig.RHELSubscriptionManagerPassword,
@@ -748,17 +748,12 @@ func (r *Reconciler) ensureInstanceExistsForMachine(
 
 			var kubeconfig *clientcmdapi.Config
 
-			// OSM will take care of the bootstrap kubeconfig and token by itself.
-			if !r.useOSM {
+			// an external provider will take care of the bootstrap kubeconfig and token by itself.
+			if !r.useExternalBootstrap {
 				kubeconfig, err = r.createBootstrapKubeconfig(ctx, machine.Name)
 				if err != nil {
 					return nil, fmt.Errorf("failed to create bootstrap kubeconfig: %w", err)
 				}
-			}
-
-			cloudConfig, kubeletCloudProviderName, err := prov.GetCloudConfig(machine.Spec)
-			if err != nil {
-				return nil, fmt.Errorf("failed to render cloud config: %w", err)
 			}
 
 			// grab kubelet featureGates from the annotations
@@ -778,6 +773,15 @@ func (r *Reconciler) ensureInstanceExistsForMachine(
 				externalCloudProvider, _ = strconv.ParseBool(val)
 			}
 
+			cloudConfig, kubeletCloudProviderName, err := prov.GetCloudConfig(machine.Spec)
+			if err != nil {
+				return nil, fmt.Errorf("failed to render cloud config: %w", err)
+			}
+
+			if providerConfig.CloudProvider == providerconfigtypes.CloudProviderVsphere && externalCloudProvider {
+				cloudConfig = ""
+			}
+
 			registryCredentials, err := containerruntime.GetContainerdAuthConfig(ctx, r.client, r.nodeSettings.RegistryCredentialsSecretRef)
 			if err != nil {
 				return nil, fmt.Errorf("failed to get containerd auth config: %w", err)
@@ -794,73 +798,52 @@ func (r *Reconciler) ensureInstanceExistsForMachine(
 				crRuntime.ContainerLogMaxFiles = val
 			}
 
-			req := plugin.UserDataRequest{
-				MachineSpec:              machine.Spec,
-				Kubeconfig:               kubeconfig,
-				CloudConfig:              cloudConfig,
-				CloudProviderName:        string(providerConfig.CloudProvider),
-				ExternalCloudProvider:    externalCloudProvider,
-				DNSIPs:                   r.nodeSettings.ClusterDNSIPs,
-				PauseImage:               r.nodeSettings.PauseImage,
-				KubeletCloudProviderName: kubeletCloudProviderName,
-				KubeletFeatureGates:      kubeletFeatureGates,
-				KubeletConfigs:           kubeletConfigs,
-				NoProxy:                  r.nodeSettings.NoProxy,
-				HTTPProxy:                r.nodeSettings.HTTPProxy,
-				ContainerRuntime:         crRuntime,
-				NodePortRange:            r.nodePortRange,
-			}
-
 			// Here we do stuff!
 			var userdata string
 
-			if r.useOSM {
+			if r.useExternalBootstrap {
 				referencedMachineDeployment, machineDeploymentRevision, err := controllerutil.GetMachineDeploymentNameAndRevisionForMachine(ctx, machine, r.client)
 				if err != nil {
 					return nil, fmt.Errorf("failed to find machine's MachineDployment: %w", err)
 				}
 
-				// We need to ensure that both provisoning and bootstrapping secrets have been created. And that the revision
-				// matches with the machine deployment revision
-				provisioningSecretName := fmt.Sprintf(osmresources.CloudConfigSecretNamePattern,
+				bootstrapSecretName := fmt.Sprintf(bootstrap.CloudConfigSecretNamePattern,
 					referencedMachineDeployment,
 					machine.Namespace,
-					osmresources.ProvisioningCloudConfig)
-
-				// Ensure that the provisioning secret exists
-				provisioningSecret := &corev1.Secret{}
-				if err := r.client.Get(ctx,
-					types.NamespacedName{Name: provisioningSecretName, Namespace: util.CloudInitNamespace},
-					provisioningSecret); err != nil {
-					klog.Errorf(CloudInitNotReadyError, osmresources.ProvisioningCloudConfig, machine.Name)
-					return nil, err
-				}
-
-				provisioningSecretRevision := provisioningSecret.Annotations[osc.MachineDeploymentRevision]
-				if provisioningSecretRevision != machineDeploymentRevision {
-					return nil, fmt.Errorf(CloudInitNotReadyError, osmresources.ProvisioningCloudConfig, machine.Name)
-				}
-
-				bootstrapSecretName := fmt.Sprintf(osmresources.CloudConfigSecretNamePattern,
-					referencedMachineDeployment,
-					machine.Namespace,
-					osmresources.BootstrapCloudConfig)
+					bootstrap.BootstrapCloudConfig)
 
 				bootstrapSecret := &corev1.Secret{}
 				if err := r.client.Get(ctx,
 					types.NamespacedName{Name: bootstrapSecretName, Namespace: util.CloudInitNamespace},
 					bootstrapSecret); err != nil {
-					klog.Errorf(CloudInitNotReadyError, osmresources.BootstrapCloudConfig, machine.Name)
+					klog.Errorf(CloudInitNotReadyError, bootstrap.BootstrapCloudConfig, machine.Name)
 					return nil, err
 				}
 
-				bootstrapSecretRevision := bootstrapSecret.Annotations[osc.MachineDeploymentRevision]
+				bootstrapSecretRevision := bootstrapSecret.Annotations[bootstrap.MachineDeploymentRevision]
 				if bootstrapSecretRevision != machineDeploymentRevision {
-					return nil, fmt.Errorf(CloudInitNotReadyError, osmresources.BootstrapCloudConfig, machine.Name)
+					return nil, fmt.Errorf(CloudInitNotReadyError, bootstrap.BootstrapCloudConfig, machine.Name)
 				}
 
-				userdata = getOSMBootstrapUserdata(req.MachineSpec.Name, *bootstrapSecret)
+				userdata = getOSMBootstrapUserdata(machine.Spec.Name, *bootstrapSecret)
 			} else {
+				req := plugin.UserDataRequest{
+					MachineSpec:              machine.Spec,
+					Kubeconfig:               kubeconfig,
+					CloudConfig:              cloudConfig,
+					CloudProviderName:        string(providerConfig.CloudProvider),
+					ExternalCloudProvider:    externalCloudProvider,
+					DNSIPs:                   r.nodeSettings.ClusterDNSIPs,
+					PauseImage:               r.nodeSettings.PauseImage,
+					KubeletCloudProviderName: kubeletCloudProviderName,
+					KubeletFeatureGates:      kubeletFeatureGates,
+					KubeletConfigs:           kubeletConfigs,
+					NoProxy:                  r.nodeSettings.NoProxy,
+					HTTPProxy:                r.nodeSettings.HTTPProxy,
+					ContainerRuntime:         crRuntime,
+					NodePortRange:            r.nodePortRange,
+				}
+
 				userdata, err = userdataPlugin.UserData(req)
 				if err != nil {
 					return nil, fmt.Errorf("failed get userdata: %w", err)
@@ -929,10 +912,10 @@ func (r *Reconciler) ensureInstanceExistsForMachine(
 	}); err != nil {
 		return nil, fmt.Errorf("failed to update machine after setting .status.addresses: %w", err)
 	}
-	return r.ensureNodeOwnerRefAndConfigSource(ctx, providerInstance, machine, providerConfig)
+	return r.ensureNodeOwnerRef(ctx, providerInstance, machine, providerConfig)
 }
 
-func (r *Reconciler) ensureNodeOwnerRefAndConfigSource(ctx context.Context, providerInstance instance.Instance, machine *clusterv1alpha1.Machine, providerConfig *providerconfigtypes.Config) (*reconcile.Result, error) {
+func (r *Reconciler) ensureNodeOwnerRef(ctx context.Context, providerInstance instance.Instance, machine *clusterv1alpha1.Machine, providerConfig *providerconfigtypes.Config) (*reconcile.Result, error) {
 	node, exists, err := r.getNode(ctx, providerInstance, providerConfig.CloudProvider)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get node for machine %s: %w", machine.Name, err)
@@ -947,14 +930,6 @@ func (r *Reconciler) ensureNodeOwnerRefAndConfigSource(ctx context.Context, prov
 			}
 		}
 
-		if node.Spec.ConfigSource == nil && machine.Spec.ConfigSource != nil {
-			if err := r.updateNode(ctx, node, func(node *corev1.Node) {
-				node.Spec.ConfigSource = machine.Spec.ConfigSource
-			}); err != nil {
-				return nil, fmt.Errorf("failed to update node %s after setting the config source: %w", node.Name, err)
-			}
-			klog.V(3).Infof("Added config source to node %s (machine %s)", node.Name, machine.Name)
-		}
 		if err := r.updateMachineStatus(machine, node); err != nil {
 			return nil, fmt.Errorf("failed to update machine status: %w", err)
 		}

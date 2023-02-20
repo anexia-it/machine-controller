@@ -22,7 +22,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"math"
 	"os"
 	"os/exec"
@@ -320,7 +319,7 @@ func uploadAndAttachISO(ctx context.Context, session *Session, vmRef *object.Vir
 func generateLocalUserdataISO(userdata, name string) (string, error) {
 	// We must create a directory, because the iso-generation commands
 	// take a directory as input
-	userdataDir, err := ioutil.TempDir(localTempDir, name)
+	userdataDir, err := os.MkdirTemp(localTempDir, name)
 	if err != nil {
 		return "", fmt.Errorf("failed to create local temp directory for userdata at %s: %w", userdataDir, err)
 	}
@@ -350,11 +349,11 @@ func generateLocalUserdataISO(userdata, name string) (string, error) {
 		return "", fmt.Errorf("failed to render metadata: %w", err)
 	}
 
-	if err := ioutil.WriteFile(userdataFilePath, []byte(userdata), 0644); err != nil {
+	if err := os.WriteFile(userdataFilePath, []byte(userdata), 0644); err != nil {
 		return "", fmt.Errorf("failed to locally write userdata file to %s: %w", userdataFilePath, err)
 	}
 
-	if err := ioutil.WriteFile(metadataFilePath, metadata.Bytes(), 0644); err != nil {
+	if err := os.WriteFile(metadataFilePath, metadata.Bytes(), 0644); err != nil {
 		return "", fmt.Errorf("failed to locally write metadata file to %s: %w", userdataFilePath, err)
 	}
 
@@ -431,7 +430,7 @@ func validateDiskResizing(disks []*types.VirtualDisk, requestedSize int64) error
 	return nil
 }
 
-//getDatastoreFromVM gets the datastore where the VM files are located.
+// getDatastoreFromVM gets the datastore where the VM files are located.
 func getDatastoreFromVM(ctx context.Context, session *Session, vmRef *object.VirtualMachine) (*object.Datastore, error) {
 	var props mo.VirtualMachine
 	// Obtain VM properties
@@ -457,38 +456,29 @@ func resolveResourcePoolRef(ctx context.Context, config *Config, session *Sessio
 	return nil, nil
 }
 
-func createAndAttachTags(ctx context.Context, config *Config, vm *object.VirtualMachine) error {
+func attachTags(ctx context.Context, config *Config, vm *object.VirtualMachine) error {
 	restAPISession, err := NewRESTSession(ctx, config)
 	if err != nil {
 		return fmt.Errorf("failed to create REST API session: %w", err)
 	}
 	defer restAPISession.Logout(ctx)
 	tagManager := tags.NewManager(restAPISession.Client)
-	klog.V(3).Info("Creating tags")
+	klog.V(3).Info("Attaching tags")
 	for _, tag := range config.Tags {
-		tagID, err := tagManager.CreateTag(ctx, &tag)
+		tagID, err := determineTagID(ctx, tagManager, tag)
 		if err != nil {
-			return fmt.Errorf("failed to create tag: %v %w", tag, err)
+			return err
 		}
 
 		if err := tagManager.AttachTag(ctx, tagID, vm.Reference()); err != nil {
-			// If attaching the tag to VM failed then delete this tag. It prevents orphan tags.
-			if errDelete := tagManager.DeleteTag(ctx, &tags.Tag{
-				ID:          tagID,
-				Description: tag.Description,
-				Name:        tag.Name,
-				CategoryID:  tag.CategoryID,
-			}); errDelete != nil {
-				return fmt.Errorf("failed to attach tag to VM and delete the orphan tag: %v, attach error: %v, delete error: %w", tag, err, errDelete)
-			}
 			klog.V(3).Infof("Failed to attach tag %v. The tag was successfully deleted", tag)
-			return fmt.Errorf("failed to attach tag to VM: %v %w", tag, err)
+			return fmt.Errorf("failed to attach tag to VM: %v %w", tag.Name, err)
 		}
 	}
 	return nil
 }
 
-func deleteTags(ctx context.Context, config *Config, vm *object.VirtualMachine) error {
+func detachTags(ctx context.Context, config *Config, vm *object.VirtualMachine) error {
 	restAPISession, err := NewRESTSession(ctx, config)
 	if err != nil {
 		return fmt.Errorf("failed to create REST API session: %w", err)
@@ -496,17 +486,34 @@ func deleteTags(ctx context.Context, config *Config, vm *object.VirtualMachine) 
 	defer restAPISession.Logout(ctx)
 	tagManager := tags.NewManager(restAPISession.Client)
 
-	tags, err := tagManager.GetAttachedTags(ctx, vm.Reference())
+	attachedTags, err := tagManager.GetAttachedTags(ctx, vm.Reference())
 	if err != nil {
 		return fmt.Errorf("failed to get attached tags for the VM: %s, %w", vm.Name(), err)
 	}
 	klog.V(3).Info("Deleting tags")
-	for _, tag := range tags {
-		err := tagManager.DeleteTag(ctx, &tag)
+	for _, tag := range attachedTags {
+		tagID, err := determineTagID(ctx, tagManager, tag)
+		if err != nil {
+			return err
+		}
+
+		err = tagManager.DetachTag(ctx, tagID, vm.Reference())
 		if err != nil {
 			return fmt.Errorf("failed to delete tag: %v %w", tag, err)
 		}
 	}
 
 	return nil
+}
+
+func determineTagID(ctx context.Context, tagManager *tags.Manager, tag tags.Tag) (string, error) {
+	if tag.ID != "" {
+		return tag.ID, nil
+	}
+
+	apiTag, err := tagManager.GetTagForCategory(ctx, tag.Name, tag.CategoryID)
+	if err != nil {
+		return "", fmt.Errorf("failed to retrieve tag: %v %w", tag.Name, err)
+	}
+	return apiTag.ID, nil
 }

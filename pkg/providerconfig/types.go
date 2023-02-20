@@ -30,7 +30,6 @@ import (
 	"github.com/kubermatic/machine-controller/pkg/userdata/flatcar"
 	"github.com/kubermatic/machine-controller/pkg/userdata/rhel"
 	"github.com/kubermatic/machine-controller/pkg/userdata/rockylinux"
-	"github.com/kubermatic/machine-controller/pkg/userdata/sles"
 	"github.com/kubermatic/machine-controller/pkg/userdata/ubuntu"
 
 	corev1 "k8s.io/api/core/v1"
@@ -184,7 +183,7 @@ func DefaultOperatingSystemSpec(
 	osys providerconfigtypes.OperatingSystem,
 	cloudProvider providerconfigtypes.CloudProvider,
 	operatingSystemSpec runtime.RawExtension,
-	operatingSystemManagerEnabled bool,
+	externalBootstrapEnabled bool,
 ) (runtime.RawExtension, error) {
 	switch osys {
 	case providerconfigtypes.OperatingSystemAmazonLinux2:
@@ -192,11 +191,9 @@ func DefaultOperatingSystemSpec(
 	case providerconfigtypes.OperatingSystemCentOS:
 		return centos.DefaultConfig(operatingSystemSpec), nil
 	case providerconfigtypes.OperatingSystemFlatcar:
-		return flatcar.DefaultConfigForCloud(operatingSystemSpec, cloudProvider, operatingSystemManagerEnabled), nil
+		return flatcar.DefaultConfigForCloud(operatingSystemSpec, cloudProvider, externalBootstrapEnabled), nil
 	case providerconfigtypes.OperatingSystemRHEL:
 		return rhel.DefaultConfig(operatingSystemSpec), nil
-	case providerconfigtypes.OperatingSystemSLES:
-		return sles.DefaultConfig(operatingSystemSpec), nil
 	case providerconfigtypes.OperatingSystemUbuntu:
 		return ubuntu.DefaultConfig(operatingSystemSpec), nil
 	case providerconfigtypes.OperatingSystemRockyLinux:

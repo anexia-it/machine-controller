@@ -14,7 +14,7 @@
 
 presubmits:
   - name: pull-machine-controller-e2e-kubevirt
-    always_run: true
+    run_if_changed: "(pkg/cloudprovider/provider/kubevirt/|pkg/userdata)"
     decorate: true
     clone_uri: "ssh://git@github.com/kubermatic/machine-controller.git"
     max_concurrency: 1
@@ -29,16 +29,19 @@ presubmits:
       preset-kubeconfig-ci: "true"
     spec:
       containers:
-        - image: quay.io/kubermatic/build:go-1.18-node-16-kind-0.14-9
+        - image: quay.io/kubermatic/build:go-1.19-node-18-kind-0.17-5
           command:
             - "./hack/ci/run-e2e-tests.sh"
           args:
             - "TestKubevirtProvisioningE2E"
+          env:
+            - name: CLOUD_PROVIDER
+              value: kubevirt
           securityContext:
             privileged: true
           resources:
             requests:
-              memory: 6Gi
+              memory: 7Gi
               cpu: 2
             limits:
-              memory: 6Gi
+              memory: 7Gi

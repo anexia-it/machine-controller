@@ -14,7 +14,7 @@
 
 SHELL = /bin/bash -eu -o pipefail
 
-GO_VERSION ?= 1.18.3
+GO_VERSION ?= 1.19.4
 
 GOOS ?= $(shell go env GOOS)
 
@@ -33,7 +33,7 @@ IMAGE_TAG = \
 		$(shell echo $$(git rev-parse HEAD && if [[ -n $$(git status --porcelain) ]]; then echo '-dirty'; fi)|tr -d ' ')
 IMAGE_NAME ?= $(REGISTRY)/$(REGISTRY_NAMESPACE)/machine-controller:$(IMAGE_TAG)
 
-OS = amzn2 centos ubuntu sles rhel flatcar rockylinux
+OS = amzn2 centos ubuntu rhel flatcar rockylinux
 USERDATA_BIN = $(patsubst %, machine-controller-userdata-%, $(OS))
 
 BASE64_ENC = \
@@ -91,7 +91,7 @@ test-unit-docker:
 		-e GOCACHE=/cache \
 		-w /go/src/github.com/kubermatic/machine-controller \
 		golang:$(GO_VERSION) \
-			make test-unit GOFLAGS=$(GOFLAGS)
+			make test-unit "GOFLAGS=$(GOFLAGS)"
 
 .PHONY: test-unit
 test-unit:

@@ -14,7 +14,7 @@
 
 presubmits:
   - name: pull-machine-controller-e2e-aws
-    always_run: true
+    run_if_changed: "(pkg/cloudprovider/provider/aws/|pkg/userdata)"
     decorate: true
     clone_uri: "ssh://git@github.com/kubermatic/machine-controller.git"
     labels:
@@ -28,21 +28,24 @@ presubmits:
       preset-kubeconfig-ci: "true"
     spec:
       containers:
-        - image: quay.io/kubermatic/build:go-1.18-node-16-kind-0.14-9
+        - image: quay.io/kubermatic/build:go-1.19-node-18-kind-0.17-5
           command:
             - "./hack/ci/run-e2e-tests.sh"
           args:
             - "TestAWSProvisioningE2E"
+          env:
+            - name: CLOUD_PROVIDER
+              value: aws
           securityContext:
             privileged: true
           resources:
             requests:
-              memory: 6Gi
+              memory: 7Gi
               cpu: 2
             limits:
-              memory: 6Gi
+              memory: 7Gi
 
-  - name: pull-machine-controller-e2e-aws-legacy-userdata
+  - name: pull-machine-controller-e2e-aws-spot-instance-legacy-userdata
     always_run: true
     decorate: true
     clone_uri: "ssh://git@github.com/kubermatic/machine-controller.git"
@@ -57,25 +60,27 @@ presubmits:
       preset-kubeconfig-ci: "true"
     spec:
       containers:
-        - image: quay.io/kubermatic/build:go-1.18-node-16-kind-0.14-9
+        - image: quay.io/kubermatic/build:go-1.19-node-18-kind-0.17-5
           env:
             - name: OPERATING_SYSTEM_MANAGER
               value: "false"
+            - name: CLOUD_PROVIDER
+              value: aws
           command:
             - "./hack/ci/run-e2e-tests.sh"
           args:
-            - "TestAWSProvisioningE2E"
+            - "TestAWSSpotInstanceProvisioningE2E"
           securityContext:
             privileged: true
           resources:
             requests:
-              memory: 6Gi
+              memory: 7Gi
               cpu: 2
             limits:
-              memory: 6Gi
+              memory: 7Gi
 
   - name: pull-machine-controller-e2e-aws-arm
-    always_run: true
+    run_if_changed: "(pkg/cloudprovider/provider/aws/|pkg/userdata)"
     decorate: true
     clone_uri: "ssh://git@github.com/kubermatic/machine-controller.git"
     labels:
@@ -88,22 +93,25 @@ presubmits:
       preset-kubeconfig-ci: "true"
     spec:
       containers:
-        - image: quay.io/kubermatic/build:go-1.18-node-16-kind-0.14-9
+        - image: quay.io/kubermatic/build:go-1.19-node-18-kind-0.17-5
           command:
             - "./hack/ci/run-e2e-tests.sh"
           args:
             - "TestAWSARMProvisioningE2E"
+          env:
+            - name: CLOUD_PROVIDER
+              value: aws
           securityContext:
             privileged: true
           resources:
             requests:
-              memory: 6Gi
+              memory: 7Gi
               cpu: 2
             limits:
-              memory: 6Gi
+              memory: 7Gi
 
   - name: pull-machine-controller-e2e-aws-ebs-encryption-enabled
-    always_run: true
+    run_if_changed: "(pkg/cloudprovider/provider/aws/|pkg/userdata)"
     decorate: true
     clone_uri: "ssh://git@github.com/kubermatic/machine-controller.git"
     labels:
@@ -116,47 +124,22 @@ presubmits:
       preset-kubeconfig-ci: "true"
     spec:
       containers:
-        - image: quay.io/kubermatic/build:go-1.18-node-16-kind-0.14-9
+        - image: quay.io/kubermatic/build:go-1.19-node-18-kind-0.17-5
           command:
             - "./hack/ci/run-e2e-tests.sh"
           args:
             - "TestAWSEbsEncryptionEnabledProvisioningE2E"
+          env:
+            - name: CLOUD_PROVIDER
+              value: aws
           securityContext:
             privileged: true
           resources:
             requests:
-              memory: 6Gi
+              memory: 7Gi
               cpu: 2
             limits:
-              memory: 6Gi
-
-  - name: pull-machine-controller-e2e-aws-flatcar-containerd
-    always_run: true
-    decorate: true
-    clone_uri: "ssh://git@github.com/kubermatic/machine-controller.git"
-    labels:
-      preset-aws: "true"
-      preset-hetzner: "true"
-      preset-e2e-ssh: "true"
-      preset-goproxy: "true"
-      preset-kind-volume-mounts: "true"
-      preset-docker-mirror: "true"
-      preset-kubeconfig-ci: "true"
-    spec:
-      containers:
-        - image: quay.io/kubermatic/build:go-1.18-node-16-kind-0.14-9
-          command:
-            - "./hack/ci/run-e2e-tests.sh"
-          args:
-            - "TestAWSFlatcarContainerdProvisioningE2E"
-          securityContext:
-            privileged: true
-          resources:
-            requests:
-              memory: 6Gi
-              cpu: 2
-            limits:
-              memory: 6Gi
+              memory: 7Gi
 
   - name: pull-machine-controller-e2e-aws-spot-instance
     always_run: true
@@ -173,47 +156,22 @@ presubmits:
       preset-kubeconfig-ci: "true"
     spec:
       containers:
-        - image: quay.io/kubermatic/build:go-1.18-node-16-kind-0.14-9
+        - image: quay.io/kubermatic/build:go-1.19-node-18-kind-0.17-5
           command:
             - "./hack/ci/run-e2e-tests.sh"
           args:
             - "TestAWSSpotInstanceProvisioningE2E"
+          env:
+            - name: CLOUD_PROVIDER
+              value: aws
           securityContext:
             privileged: true
           resources:
             requests:
-              memory: 6Gi
+              memory: 7Gi
               cpu: 2
             limits:
-              memory: 6Gi
-
-  - name: pull-machine-controller-e2e-aws-sles
-    always_run: false
-    decorate: true
-    clone_uri: "ssh://git@github.com/kubermatic/machine-controller.git"
-    labels:
-      preset-aws: "true"
-      preset-hetzner: "true"
-      preset-e2e-ssh: "true"
-      preset-goproxy: "true"
-      preset-kind-volume-mounts: "true"
-      preset-docker-mirror: "true"
-      preset-kubeconfig-ci: "true"
-    spec:
-      containers:
-        - image: quay.io/kubermatic/build:go-1.18-node-16-kind-0.14-9
-          command:
-            - "./hack/ci/run-e2e-tests.sh"
-          args:
-            - "TestAWSSLESProvisioningE2E"
-          securityContext:
-            privileged: true
-          resources:
-            requests:
-              memory: 6Gi
-              cpu: 2
-            limits:
-              memory: 6Gi
+              memory: 7Gi
 
   - name: pull-machine-controller-e2e-aws-flatcar-coreos-cloud-init
     always_run: false
@@ -229,19 +187,22 @@ presubmits:
       preset-kubeconfig-ci: "true"
     spec:
       containers:
-        - image: quay.io/kubermatic/build:go-1.18-node-16-kind-0.14-9
+        - image: quay.io/kubermatic/build:go-1.19-node-18-kind-0.17-5
           command:
             - "./hack/ci/run-e2e-tests.sh"
           args:
             - "TestAWSFlatcarCoreOSCloudInit8ProvisioningE2E"
+          env:
+            - name: CLOUD_PROVIDER
+              value: aws
           securityContext:
             privileged: true
           resources:
             requests:
-              memory: 6Gi
+              memory: 7Gi
               cpu: 2
             limits:
-              memory: 6Gi
+              memory: 7Gi
 
   - name: pull-machine-controller-e2e-aws-centos8
     always_run: false
@@ -257,19 +218,22 @@ presubmits:
       preset-kubeconfig-ci: "true"
     spec:
       containers:
-        - image: quay.io/kubermatic/build:go-1.18-node-16-kind-0.14-9
+        - image: quay.io/kubermatic/build:go-1.19-node-18-kind-0.17-5
           command:
             - "./hack/ci/run-e2e-tests.sh"
           args:
             - "TestAWSCentOS8ProvisioningE2E"
+          env:
+            - name: CLOUD_PROVIDER
+              value: aws
           securityContext:
             privileged: true
           resources:
             requests:
-              memory: 6Gi
+              memory: 7Gi
               cpu: 2
             limits:
-              memory: 6Gi
+              memory: 7Gi
 
   - name: pull-machine-controller-e2e-aws-assume-role
     always_run: false
@@ -285,16 +249,19 @@ presubmits:
       preset-kubeconfig-ci: "true"
     spec:
       containers:
-        - image: quay.io/kubermatic/build:go-1.18-node-16-kind-0.14-9
+        - image: quay.io/kubermatic/build:go-1.19-node-18-kind-0.17-5
           command:
             - "./hack/ci/run-e2e-tests.sh"
           args:
             - "TestAWSAssumeRoleProvisioningE2E"
+          env:
+            - name: CLOUD_PROVIDER
+              value: aws
           securityContext:
             privileged: true
           resources:
             requests:
-              memory: 6Gi
+              memory: 7Gi
               cpu: 2
             limits:
-              memory: 6Gi
+              memory: 7Gi

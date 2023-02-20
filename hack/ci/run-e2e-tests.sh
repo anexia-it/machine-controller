@@ -19,6 +19,10 @@ set -euo pipefail
 cd $(dirname $0)/../..
 source hack/lib.sh
 
+if provider_disabled "${CLOUD_PROVIDER:-}"; then
+  exit 0
+fi
+
 function cleanup {
   set +e
 
@@ -67,11 +71,6 @@ beforeMCSetup=$(nowms)
 
 source hack/ci/setup-machine-controller-in-kind.sh
 pushElapsed kind_mc_setup_duration_milliseconds $beforeMCSetup
-
-if [[ ! -z "${NUTANIX_E2E_PROXY_HOST:-}" ]]; then
-  vm_priv_addr=$(cat ./priv_addr)
-  export NUTANIX_E2E_PROXY_URL="http://${NUTANIX_E2E_PROXY_USERNAME}:${NUTANIX_E2E_PROXY_PASSWORD}@${vm_priv_addr}:${NUTANIX_E2E_PROXY_PORT}/"
-fi
 
 echo "Running e2e tests..."
 EXTRA_ARGS=""

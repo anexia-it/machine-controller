@@ -17,16 +17,28 @@ limitations under the License.
 package types
 
 import (
+	kubevirtv1 "kubevirt.io/api/core/v1"
+
 	"github.com/kubermatic/machine-controller/pkg/jsonutil"
 	providerconfigtypes "github.com/kubermatic/machine-controller/pkg/providerconfig/types"
 
 	corev1 "k8s.io/api/core/v1"
 )
 
+var SupportedOS = map[providerconfigtypes.OperatingSystem]*struct{}{
+	providerconfigtypes.OperatingSystemCentOS:     nil,
+	providerconfigtypes.OperatingSystemUbuntu:     nil,
+	providerconfigtypes.OperatingSystemRHEL:       nil,
+	providerconfigtypes.OperatingSystemFlatcar:    nil,
+	providerconfigtypes.OperatingSystemRockyLinux: nil,
+}
+
 type RawConfig struct {
-	Auth           Auth           `json:"auth,omitempty"`
-	VirtualMachine VirtualMachine `json:"virtualMachine,omitempty"`
-	Affinity       Affinity       `json:"affinity,omitempty"`
+	ClusterName               providerconfigtypes.ConfigVarString `json:"clusterName"`
+	Auth                      Auth                                `json:"auth,omitempty"`
+	VirtualMachine            VirtualMachine                      `json:"virtualMachine,omitempty"`
+	Affinity                  Affinity                            `json:"affinity,omitempty"`
+	TopologySpreadConstraints []TopologySpreadConstraint          `json:"topologySpreadConstraints"`
 }
 
 // Auth.
@@ -36,10 +48,15 @@ type Auth struct {
 
 // VirtualMachine.
 type VirtualMachine struct {
-	Flavor    Flavor                              `json:"flavor,omitempty"`
-	Template  Template                            `json:"template,omitempty"`
-	DNSPolicy providerconfigtypes.ConfigVarString `json:"dnsPolicy,omitempty"`
-	DNSConfig *corev1.PodDNSConfig                `json:"dnsConfig,omitempty"`
+	// Deprecated: use Instancetype/Preference instead.
+	Flavor Flavor `json:"flavor,omitempty"`
+	// Instancetype is optional.
+	Instancetype *kubevirtv1.InstancetypeMatcher `json:"instancetype,omitempty"`
+	// Preference is optional.
+	Preference *kubevirtv1.PreferenceMatcher       `json:"preference,omitempty"`
+	Template   Template                            `json:"template,omitempty"`
+	DNSPolicy  providerconfigtypes.ConfigVarString `json:"dnsPolicy,omitempty"`
+	DNSConfig  *corev1.PodDNSConfig                `json:"dnsConfig,omitempty"`
 }
 
 // Flavor.
@@ -60,6 +77,8 @@ type Template struct {
 type PrimaryDisk struct {
 	Disk
 	OsImage providerconfigtypes.ConfigVarString `json:"osImage,omitempty"`
+	// Source describes the VM Disk Image source.
+	Source providerconfigtypes.ConfigVarString `json:"source,omitempty"`
 }
 
 // SecondaryDisks.
@@ -75,7 +94,9 @@ type Disk struct {
 
 // Affinity.
 type Affinity struct {
-	PodAffinityPreset     providerconfigtypes.ConfigVarString `json:"podAffinityPreset,omitempty"`
+	// Deprecated: Use TopologySpreadConstraint instead.
+	PodAffinityPreset providerconfigtypes.ConfigVarString `json:"podAffinityPreset,omitempty"`
+	// Deprecated: Use TopologySpreadConstraint instead.
 	PodAntiAffinityPreset providerconfigtypes.ConfigVarString `json:"podAntiAffinityPreset,omitempty"`
 	NodeAffinityPreset    NodeAffinityPreset                  `json:"nodeAffinityPreset,omitempty"`
 }
@@ -85,6 +106,17 @@ type NodeAffinityPreset struct {
 	Type   providerconfigtypes.ConfigVarString   `json:"type,omitempty"`
 	Key    providerconfigtypes.ConfigVarString   `json:"key,omitempty"`
 	Values []providerconfigtypes.ConfigVarString `json:"values,omitempty"`
+}
+
+// TopologySpreadConstraint describes topology spread constraints for VMs.
+type TopologySpreadConstraint struct {
+	// MaxSkew describes the degree to which VMs may be unevenly distributed.
+	MaxSkew providerconfigtypes.ConfigVarString `json:"maxSkew,omitempty"`
+	// TopologyKey is the key of infra-node labels.
+	TopologyKey providerconfigtypes.ConfigVarString `json:"topologyKey,omitempty"`
+	// WhenUnsatisfiable indicates how to deal with a VM if it doesn't satisfy
+	// the spread constraint.
+	WhenUnsatisfiable providerconfigtypes.ConfigVarString `json:"whenUnsatisfiable,omitempty"`
 }
 
 func GetConfig(pconfig providerconfigtypes.Config) (*RawConfig, error) {

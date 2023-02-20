@@ -23,8 +23,14 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
+	"sync"
 	"time"
 
+	"go.anx.io/go-anxcloud/pkg/api"
+	corev1 "go.anx.io/go-anxcloud/pkg/apis/core/v1"
+	vspherev1 "go.anx.io/go-anxcloud/pkg/apis/vsphere/v1"
+	"go.anx.io/go-anxcloud/pkg/client"
 	anxclient "go.anx.io/go-anxcloud/pkg/client"
 	anxaddr "go.anx.io/go-anxcloud/pkg/ipam/address"
 	"go.anx.io/go-anxcloud/pkg/vsphere"
@@ -37,7 +43,6 @@ import (
 	cloudprovidererrors "github.com/kubermatic/machine-controller/pkg/cloudprovider/errors"
 	"github.com/kubermatic/machine-controller/pkg/cloudprovider/instance"
 	anxtypes "github.com/kubermatic/machine-controller/pkg/cloudprovider/provider/anexia/types"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/provider/anexia/utils"
 	cloudprovidertypes "github.com/kubermatic/machine-controller/pkg/cloudprovider/types"
 	"github.com/kubermatic/machine-controller/pkg/providerconfig"
 	providerconfigtypes "github.com/kubermatic/machine-controller/pkg/providerconfig/types"
@@ -46,7 +51,6 @@ import (
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8stypes "k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog"
 )
 
@@ -54,8 +58,35 @@ const (
 	ProvisionedType = "Provisioned"
 )
 
+var (
+	// ErrConfigDiskSizeAndDisks is returned when the config has both DiskSize and Disks set, which is unsupported.
+	ErrConfigDiskSizeAndDisks = errors.New("both the deprecated DiskSize and new Disks attribute are set")
+
+	// ErrMultipleDisksNotYetImplemented is returned when multiple disks are configured.
+	ErrMultipleDisksNotYetImplemented = errors.New("multiple disks configured, but this feature is not yet implemented")
+)
+
 type provider struct {
 	configVarResolver *providerconfig.ConfigVarResolver
+}
+
+// resolvedDisk contains the resolved values from types.RawDisk.
+type resolvedDisk struct {
+	anxtypes.RawDisk
+
+	PerformanceType string
+}
+
+// resolvedConfig contains the resolved values from types.RawConfig.
+type resolvedConfig struct {
+	anxtypes.RawConfig
+
+	Token      string
+	VlanID     string
+	LocationID string
+	TemplateID string
+
+	Disks []resolvedDisk
 }
 
 func (p *provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData, userdata string) (instance instance.Instance, retErr error) {
@@ -65,20 +96,20 @@ func (p *provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine,
 	// ensure conditions are present on machine
 	ensureConditions(&status)
 
-	config, _, err := p.getConfig(machine.Spec.ProviderSpec)
+	config, _, err := p.getConfig(ctx, machine.Spec.ProviderSpec)
 	if err != nil {
 		return nil, fmt.Errorf("unable to get provider config: %w", err)
 	}
 
-	ctx = utils.CreateReconcileContext(ctx, utils.ReconcileContext{
+	ctx = createReconcileContext(ctx, reconcileContext{
 		Status:       &status,
 		UserData:     userdata,
-		Config:       config,
+		Config:       *config,
 		ProviderData: data,
 		Machine:      machine,
 	})
 
-	client, err := getClient(config.Token)
+	_, client, err := getClient(config.Token)
 	if err != nil {
 		return nil, err
 	}
@@ -89,53 +120,16 @@ func (p *provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine,
 		retErr = anxtypes.NewMultiError(retErr, updateMachineStatus(machine, status, data.Update))
 	}()
 
-	// check whether machine is already provisioning
-	if isAlreadyProvisioning(ctx) && status.ProvisioningID == "" {
-		klog.Info("ongoing provisioning detected")
-		err := waitForVM(ctx, client)
-		if err != nil {
-			return nil, err
-		}
-		return p.Get(ctx, machine, data)
-	}
-
 	// provision machine
 	err = provisionVM(ctx, client)
 	if err != nil {
-		return nil, err
+		return nil, anexiaErrorToTerminalError(err, "failed waiting for vm provisioning")
 	}
 	return p.Get(ctx, machine, data)
 }
 
-func waitForVM(ctx context.Context, client anxclient.Client) error {
-	reconcileContext := utils.GetReconcileContext(ctx)
-	api := vsphere.NewAPI(client)
-	var identifier string
-	err := wait.PollImmediate(5*time.Second, 1*time.Minute, func() (bool, error) {
-		klog.V(2).Info("checking for VM with name ", reconcileContext.Machine.Name)
-		vms, err := api.Search().ByName(ctx, fmt.Sprintf("%%-%s", reconcileContext.Machine.Name))
-		if err != nil {
-			return false, nil
-		}
-		if len(vms) < 1 {
-			return false, nil
-		}
-		if len(vms) > 1 {
-			return false, errors.New("too many VMs returned by search")
-		}
-		identifier = vms[0].Identifier
-		return true, nil
-	})
-	if err != nil {
-		return err
-	}
-
-	reconcileContext.Status.InstanceID = identifier
-	return updateMachineStatus(reconcileContext.Machine, *reconcileContext.Status, reconcileContext.ProviderData.Update)
-}
-
 func provisionVM(ctx context.Context, client anxclient.Client) error {
-	reconcileContext := utils.GetReconcileContext(ctx)
+	reconcileContext := getReconcileContext(ctx)
 	vmAPI := vsphere.NewAPI(client)
 
 	ctx, cancel := context.WithTimeout(ctx, anxtypes.CreateRequestTimeout)
@@ -164,12 +158,15 @@ func provisionVM(ctx context.Context, client anxclient.Client) error {
 			reconcileContext.Machine.Name,
 			config.CPUs,
 			config.Memory,
-			config.DiskSize,
+			config.Disks[0].Size,
 			networkInterfaces,
 		)
 
+		vm.DiskType = config.Disks[0].PerformanceType
+
 		vm.Script = base64.StdEncoding.EncodeToString([]byte(reconcileContext.UserData))
 
+		// We generate a fresh SSH key but will never actually use it - we just want a valid public key to disable password authentication for our fresh VM.
 		sshKey, err := ssh.NewKey()
 		if err != nil {
 			return newError(common.CreateMachineError, "failed to generate ssh key: %v", err)
@@ -200,15 +197,6 @@ func provisionVM(ctx context.Context, client anxclient.Client) error {
 	klog.V(2).Info(fmt.Sprintf("Using provisionID from machine '%s' to await completion",
 		reconcileContext.Machine.Name))
 
-	instanceID, err := vmAPI.Provisioning().Progress().AwaitCompletion(ctx, status.ProvisioningID)
-	if err != nil {
-		klog.Errorf("failed to await machine completion '%s'", reconcileContext.Machine.Name)
-		// something went wrong remove provisioning ID, so we can start from scratch
-		status.ProvisioningID = ""
-		return newError(common.CreateMachineError, "instance provisioning failed: %v", err)
-	}
-
-	status.InstanceID = instanceID
 	meta.SetStatusCondition(&status.Conditions, v1.Condition{
 		Type:    ProvisionedType,
 		Status:  v1.ConditionTrue,
@@ -219,15 +207,21 @@ func provisionVM(ctx context.Context, client anxclient.Client) error {
 	return updateMachineStatus(reconcileContext.Machine, *status, reconcileContext.ProviderData.Update)
 }
 
+var _engsup3404mutex sync.Mutex
+
 func getIPAddress(ctx context.Context, client anxclient.Client) (string, error) {
-	reconcileContext := utils.GetReconcileContext(ctx)
+	reconcileContext := getReconcileContext(ctx)
 	status := reconcileContext.Status
 
 	// only use IP if it is still unbound
 	if status.ReservedIP != "" && status.IPState == anxtypes.IPStateUnbound {
-		klog.Info("reusing already provisioned ip", "IP", status.ReservedIP)
+		klog.Infof("reusing already provisioned ip %q", status.ReservedIP)
 		return status.ReservedIP, nil
 	}
+
+	_engsup3404mutex.Lock()
+	defer _engsup3404mutex.Unlock()
+
 	klog.Info(fmt.Sprintf("Creating a new IP for machine %q", reconcileContext.Machine.Name))
 	addrAPI := anxaddr.NewAPI(client)
 	config := reconcileContext.Config
@@ -251,7 +245,7 @@ func getIPAddress(ctx context.Context, client anxclient.Client) (string, error) 
 }
 
 func isAlreadyProvisioning(ctx context.Context) bool {
-	status := utils.GetReconcileContext(ctx).Status
+	status := getReconcileContext(ctx).Status
 	condition := meta.FindStatusCondition(status.Conditions, ProvisionedType)
 	lastChange := condition.LastTransitionTime.Time
 	const reasonInProvisioning = "InProvisioning"
@@ -278,7 +272,96 @@ func ensureConditions(status *anxtypes.ProviderStatus) {
 	}
 }
 
-func (p *provider) getConfig(provSpec clusterv1alpha1.ProviderSpec) (*anxtypes.Config, *providerconfigtypes.Config, error) {
+func resolveTemplateID(ctx context.Context, a api.API, config anxtypes.RawConfig, configVarResolver *providerconfig.ConfigVarResolver, locationID string) (string, error) {
+	templateName, err := configVarResolver.GetConfigVarStringValue(config.Template)
+	if err != nil {
+		return "", fmt.Errorf("failed to get 'template': %w", err)
+	}
+
+	templateBuild, err := configVarResolver.GetConfigVarStringValue(config.TemplateBuild)
+	if err != nil {
+		return "", fmt.Errorf("failed to get 'templateBuild': %w", err)
+	}
+
+	template, err := vspherev1.FindNamedTemplate(ctx, a, templateName, templateBuild, corev1.Location{Identifier: locationID})
+	if err != nil {
+		return "", fmt.Errorf("failed to retrieve named template: %w", err)
+	}
+
+	return template.Identifier, nil
+}
+
+func (p *provider) resolveConfig(ctx context.Context, config anxtypes.RawConfig) (*resolvedConfig, error) {
+	var err error
+	ret := resolvedConfig{
+		RawConfig: config,
+	}
+
+	ret.Token, err = p.configVarResolver.GetConfigVarStringValueOrEnv(config.Token, anxtypes.AnxTokenEnv)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get 'token': %w", err)
+	}
+
+	ret.LocationID, err = p.configVarResolver.GetConfigVarStringValue(config.LocationID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get 'locationID': %w", err)
+	}
+
+	ret.TemplateID, err = p.configVarResolver.GetConfigVarStringValue(config.TemplateID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get 'templateID': %w", err)
+	}
+
+	// when "templateID" is not set, we expect "template" to be
+	if ret.TemplateID == "" {
+		a, _, err := getClient(ret.Token)
+		if err != nil {
+			return nil, fmt.Errorf("failed initializing API clients: %w", err)
+		}
+
+		templateID, err := resolveTemplateID(ctx, a, config, p.configVarResolver, ret.LocationID)
+		if err != nil {
+			return nil, fmt.Errorf("failed retrieving template id from named template: %w", err)
+		}
+
+		ret.TemplateID = templateID
+	}
+
+	ret.VlanID, err = p.configVarResolver.GetConfigVarStringValue(config.VlanID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get 'vlanID': %w", err)
+	}
+
+	if config.DiskSize != 0 {
+		if len(config.Disks) != 0 {
+			return nil, ErrConfigDiskSizeAndDisks
+		}
+
+		klog.Warningf("Configuration uses the deprecated DiskSize attribute, please migrate to the Disks array instead.")
+
+		config.Disks = []anxtypes.RawDisk{
+			{
+				Size: config.DiskSize,
+			},
+		}
+		config.DiskSize = 0
+	}
+
+	ret.Disks = make([]resolvedDisk, len(config.Disks))
+
+	for idx, disk := range config.Disks {
+		ret.Disks[idx].RawDisk = disk
+
+		ret.Disks[idx].PerformanceType, err = p.configVarResolver.GetConfigVarStringValue(disk.PerformanceType)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get 'performanceType' of disk %v: %w", idx, err)
+		}
+	}
+
+	return &ret, nil
+}
+
+func (p *provider) getConfig(ctx context.Context, provSpec clusterv1alpha1.ProviderSpec) (*resolvedConfig, *providerconfigtypes.Config, error) {
 	if provSpec.Value == nil {
 		return nil, nil, fmt.Errorf("machine.spec.providerSpec.value is nil")
 	}
@@ -293,35 +376,15 @@ func (p *provider) getConfig(provSpec clusterv1alpha1.ProviderSpec) (*anxtypes.C
 
 	rawConfig, err := anxtypes.GetConfig(*pconfig)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("error parsing provider config: %w", err)
 	}
 
-	c := anxtypes.Config{}
-	c.Token, err = p.configVarResolver.GetConfigVarStringValueOrEnv(rawConfig.Token, anxtypes.AnxTokenEnv)
+	resolvedConfig, err := p.resolveConfig(ctx, *rawConfig)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get 'token': %w", err)
+		return nil, nil, fmt.Errorf("error resolving config: %w", err)
 	}
 
-	c.CPUs = rawConfig.CPUs
-	c.Memory = rawConfig.Memory
-	c.DiskSize = rawConfig.DiskSize
-
-	c.LocationID, err = p.configVarResolver.GetConfigVarStringValue(rawConfig.LocationID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get 'locationID': %w", err)
-	}
-
-	c.TemplateID, err = p.configVarResolver.GetConfigVarStringValue(rawConfig.TemplateID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get 'templateID': %w", err)
-	}
-
-	c.VlanID, err = p.configVarResolver.GetConfigVarStringValue(rawConfig.VlanID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get 'vlanID': %w", err)
-	}
-
-	return &c, pconfig, nil
+	return resolvedConfig, pconfig, nil
 }
 
 // New returns an Anexia provider.
@@ -335,22 +398,32 @@ func (p *provider) AddDefaults(spec clusterv1alpha1.MachineSpec) (clusterv1alpha
 }
 
 // Validate returns success or failure based according to its ProviderSpec.
-func (p *provider) Validate(_ context.Context, machinespec clusterv1alpha1.MachineSpec) error {
-	config, _, err := p.getConfig(machinespec.ProviderSpec)
+func (p *provider) Validate(ctx context.Context, machinespec clusterv1alpha1.MachineSpec) error {
+	config, _, err := p.getConfig(ctx, machinespec.ProviderSpec)
 	if err != nil {
 		return fmt.Errorf("failed to parse config: %w", err)
 	}
 
 	if config.Token == "" {
-		return errors.New("token is missing")
+		return errors.New("token not set")
 	}
 
 	if config.CPUs == 0 {
 		return errors.New("cpu count is missing")
 	}
 
-	if config.DiskSize == 0 {
-		return errors.New("disk size is missing")
+	if len(config.Disks) == 0 {
+		return errors.New("no disks configured")
+	}
+
+	if len(config.Disks) > 1 {
+		return ErrMultipleDisksNotYetImplemented
+	}
+
+	for _, disk := range config.Disks {
+		if disk.Size == 0 {
+			return errors.New("disk size is missing")
+		}
 	}
 
 	if config.Memory == 0 {
@@ -362,7 +435,7 @@ func (p *provider) Validate(_ context.Context, machinespec clusterv1alpha1.Machi
 	}
 
 	if config.TemplateID == "" {
-		return errors.New("template id is missing")
+		return errors.New("no valid template configured")
 	}
 
 	if config.VlanID == "" {
@@ -372,13 +445,13 @@ func (p *provider) Validate(_ context.Context, machinespec clusterv1alpha1.Machi
 	return nil
 }
 
-func (p *provider) Get(ctx context.Context, machine *clusterv1alpha1.Machine, _ *cloudprovidertypes.ProviderData) (instance.Instance, error) {
-	config, _, err := p.getConfig(machine.Spec.ProviderSpec)
+func (p *provider) Get(ctx context.Context, machine *clusterv1alpha1.Machine, pd *cloudprovidertypes.ProviderData) (instance.Instance, error) {
+	config, _, err := p.getConfig(ctx, machine.Spec.ProviderSpec)
 	if err != nil {
-		return nil, newError(common.InvalidConfigurationMachineError, "failed to parse MachineSpec: %v", err)
+		return nil, newError(common.InvalidConfigurationMachineError, "failed to retrieve config: %v", err)
 	}
 
-	cli, err := getClient(config.Token)
+	_, cli, err := getClient(config.Token)
 	if err != nil {
 		return nil, newError(common.InvalidConfigurationMachineError, "failed to create Anexia client: %v", err)
 	}
@@ -388,8 +461,34 @@ func (p *provider) Get(ctx context.Context, machine *clusterv1alpha1.Machine, _ 
 	if err != nil {
 		return nil, newError(common.InvalidConfigurationMachineError, "failed to get machine status: %v", err)
 	}
-	if status.InstanceID == "" {
+
+	if status.InstanceID == "" && status.ProvisioningID == "" {
 		return nil, cloudprovidererrors.ErrInstanceNotFound
+	}
+
+	if status.InstanceID == "" {
+		progress, err := vsphereAPI.Provisioning().Progress().Get(ctx, status.ProvisioningID)
+		if err != nil {
+			return nil, anexiaErrorToTerminalError(err, "failed to get provisioning progress")
+		}
+		if len(progress.Errors) > 0 {
+			return nil, fmt.Errorf("vm provisioning had errors: %s", strings.Join(progress.Errors, ","))
+		}
+		if progress.Progress < 100 || progress.VMIdentifier == "" {
+			return &anexiaInstance{isCreating: true}, nil
+		}
+
+		status.InstanceID = progress.VMIdentifier
+
+		if err := updateMachineStatus(machine, status, pd.Update); err != nil {
+			return nil, fmt.Errorf("failed updating machine status: %w", err)
+		}
+	}
+
+	instance := anexiaInstance{}
+
+	if status.IPState == anxtypes.IPStateBound && status.ReservedIP != "" {
+		instance.reservedAddresses = []string{status.ReservedIP}
 	}
 
 	timeoutCtx, cancel := context.WithTimeout(ctx, anxtypes.GetRequestTimeout)
@@ -397,12 +496,11 @@ func (p *provider) Get(ctx context.Context, machine *clusterv1alpha1.Machine, _ 
 
 	info, err := vsphereAPI.Info().Get(timeoutCtx, status.InstanceID)
 	if err != nil {
-		return nil, fmt.Errorf("failed get machine info: %w", err)
+		return nil, anexiaErrorToTerminalError(err, "failed getting machine info")
 	}
+	instance.info = &info
 
-	return &anexiaInstance{
-		info: &info,
-	}, nil
+	return &instance, nil
 }
 
 func (p *provider) GetCloudConfig(_ clusterv1alpha1.MachineSpec) (string, string, error) {
@@ -418,12 +516,12 @@ func (p *provider) Cleanup(ctx context.Context, machine *clusterv1alpha1.Machine
 	}()
 
 	ensureConditions(&status)
-	config, _, err := p.getConfig(machine.Spec.ProviderSpec)
+	config, _, err := p.getConfig(ctx, machine.Spec.ProviderSpec)
 	if err != nil {
 		return false, newError(common.InvalidConfigurationMachineError, "failed to parse MachineSpec: %v", err)
 	}
 
-	cli, err := getClient(config.Token)
+	_, cli, err := getClient(config.Token)
 	if err != nil {
 		return false, newError(common.InvalidConfigurationMachineError, "failed to create Anexia client: %v", err)
 	}
@@ -482,10 +580,21 @@ func (p *provider) SetMetricsForMachines(_ clusterv1alpha1.MachineList) error {
 	return nil
 }
 
-func getClient(token string) (anxclient.Client, error) {
+func getClient(token string) (api.API, anxclient.Client, error) {
 	tokenOpt := anxclient.TokenFromString(token)
 	client := anxclient.HTTPClient(&http.Client{Timeout: 120 * time.Second})
-	return anxclient.New(tokenOpt, client)
+
+	a, err := api.NewAPI(api.WithClientOptions(client, tokenOpt))
+	if err != nil {
+		return nil, nil, fmt.Errorf("error creating generic API client: %w", err)
+	}
+
+	legacyClient, err := anxclient.New(tokenOpt, client)
+	if err != nil {
+		return nil, nil, fmt.Errorf("error creating legacy client: %w", err)
+	}
+
+	return a, legacyClient, nil
 }
 
 func getProviderStatus(machine *clusterv1alpha1.Machine) anxtypes.ProviderStatus {
@@ -526,4 +635,24 @@ func updateMachineStatus(machine *clusterv1alpha1.Machine, status anxtypes.Provi
 	}
 
 	return nil
+}
+
+func anexiaErrorToTerminalError(err error, msg string) error {
+	var httpError api.HTTPError
+	if errors.As(err, &httpError) && (httpError.StatusCode() == http.StatusForbidden || httpError.StatusCode() == http.StatusUnauthorized) {
+		return cloudprovidererrors.TerminalError{
+			Reason:  common.InvalidConfigurationMachineError,
+			Message: "Request was rejected due to invalid credentials",
+		}
+	}
+
+	var responseError *client.ResponseError
+	if errors.As(err, &responseError) && (responseError.ErrorData.Code == http.StatusForbidden || responseError.ErrorData.Code == http.StatusUnauthorized) {
+		return cloudprovidererrors.TerminalError{
+			Reason:  common.InvalidConfigurationMachineError,
+			Message: "Request was rejected due to invalid credentials",
+		}
+	}
+
+	return fmt.Errorf("%s: %w", msg, err)
 }

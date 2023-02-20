@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -30,6 +31,7 @@ import (
 
 type Opts struct {
 	ContainerRuntime          string
+	ContainerdVersion         string
 	InsecureRegistries        string
 	RegistryMirrors           string
 	RegistryCredentialsSecret string
@@ -45,11 +47,25 @@ func BuildConfig(opts Opts) (Config, error) {
 		}
 	}
 
-	var registryMirrors []string
+	// we want to match e.g. docker.io=registry.docker-cn.com, having docker.io as the first
+	// match group and registry.docker-cn.com as the second one.
+	registryMirrorRegexp := regexp.MustCompile(`^([a-zA-Z0-9\.-]+)=(.*)`)
+
+	if opts.ContainerdRegistryMirrors == nil {
+		opts.ContainerdRegistryMirrors = make(RegistryMirrorsFlags)
+	}
+
 	for _, mirror := range strings.Split(opts.RegistryMirrors, ",") {
 		if trimmedMirror := strings.TrimSpace(mirror); trimmedMirror != "" {
-			if !strings.HasPrefix(mirror, "http") {
-				trimmedMirror = "https://" + mirror
+			registry := "docker.io"
+
+			if matches := registryMirrorRegexp.FindStringSubmatch(trimmedMirror); matches != nil {
+				registry = matches[1]
+				trimmedMirror = matches[2]
+			}
+
+			if !strings.HasPrefix(trimmedMirror, "http") {
+				trimmedMirror = "https://" + trimmedMirror
 			}
 
 			_, err := url.Parse(trimmedMirror)
@@ -57,15 +73,12 @@ func BuildConfig(opts Opts) (Config, error) {
 				return Config{}, fmt.Errorf("incorrect mirror provided: %w", err)
 			}
 
-			registryMirrors = append(registryMirrors, trimmedMirror)
-		}
-	}
+			if opts.ContainerdRegistryMirrors[registry] == nil {
+				opts.ContainerdRegistryMirrors[registry] = make([]string, 0, 1)
+			}
 
-	if len(registryMirrors) > 0 {
-		if opts.ContainerdRegistryMirrors == nil {
-			opts.ContainerdRegistryMirrors = make(RegistryMirrorsFlags)
+			opts.ContainerdRegistryMirrors[registry] = append(opts.ContainerdRegistryMirrors[registry], trimmedMirror)
 		}
-		opts.ContainerdRegistryMirrors["docker.io"] = registryMirrors
 	}
 
 	// Only validate registry credential here
@@ -80,6 +93,7 @@ func BuildConfig(opts Opts) (Config, error) {
 		withInsecureRegistries(insecureRegistries),
 		withRegistryMirrors(opts.ContainerdRegistryMirrors),
 		withSandboxImage(opts.PauseImage),
+		withContainerdVersion(opts.ContainerdVersion),
 	), nil
 }
 

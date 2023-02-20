@@ -170,7 +170,7 @@ const userDataIgnitionTemplate = `passwd:
         {{end}}
 {{- end }}
 
-{{- if .ProviderSpec.Network }}
+{{- if .ProviderSpec.Network.IsStaticIPConfig }}
 networkd:
   units:
     - name: static-nic.network
@@ -374,6 +374,13 @@ storage:
         inline: |
 {{ .NodeIPScript | indent 10 }}
 
+    - path: "/etc/systemd/network/zz-default.network.d/ipv6-fix.conf"
+      filesystem: root
+      mode: 0755
+      contents:
+        inline: |
+          [Network]
+          IPv6AcceptRA=true
     - path: /etc/kubernetes/bootstrap-kubelet.conf
       filesystem: root
       mode: 0400
@@ -381,12 +388,14 @@ storage:
         inline: |
 {{ .Kubeconfig | indent 10 }}
 
+{{- if ne (len .CloudConfig) 0 }}
     - path: /etc/kubernetes/cloud-config
       filesystem: root
       mode: 0400
       contents:
         inline: |
 {{ .CloudConfig | indent 10 }}
+{{- end }}
 
     - path: /etc/kubernetes/pki/ca.crt
       filesystem: root
@@ -537,7 +546,7 @@ users:
 
 coreos:
   units:
-{{- if .ProviderSpec.Network }}
+{{- if .ProviderSpec.Network.IsStaticIPConfig }}
   - name: static-nic.network
     content: |
       [Match]
@@ -630,6 +639,12 @@ coreos:
         [Unit]
         Requires=download-script.service
         After=download-script.service
+{{- if eq .CloudProviderName "anexia" }}
+    - name: 50-rpc-statd.conf
+      content: |
+        [Unit]
+        Wants=rpc-statd.service
+{{- end }}
     content: |
 {{ kubeletSystemdUnit .ContainerRuntimeName .KubeletVersion .KubeletCloudProviderName .MachineSpec.Name .DNSIPs .ExternalCloudProvider .ProviderSpec.Network.GetIPFamily .PauseImage .MachineSpec.Taints .ExtraKubeletFlags false | indent 6 }}
 
@@ -697,6 +712,15 @@ write_files:
   permissions: "0755"
   content: |
 {{ .NodeIPScript | indent 4 }}
+
+- path: "/etc/systemd/network/zz-default.network.d/ipv6-fix.conf"
+  permissions: "0755"
+  content: |
+    # IPv6 autoconfiguration doesn't work out of the box on some versions of Flatcar
+    # so we enable IPv6 Router Advertisement here.
+    # See for details https://github.com/flatcar-linux/Flatcar/issues/384
+    [Network]
+    IPv6AcceptRA=true
 
 - path: /etc/kubernetes/bootstrap-kubelet.conf
   permissions: "0400"

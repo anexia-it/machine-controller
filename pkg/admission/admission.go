@@ -21,7 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"reflect"
 	"time"
@@ -42,37 +42,37 @@ import (
 )
 
 type admissionData struct {
-	client          ctrlruntimeclient.Client
-	workerClient    ctrlruntimeclient.Client
-	userDataManager *userdatamanager.Manager
-	nodeSettings    machinecontroller.NodeSettings
-	useOSM          bool
-	namespace       string
-	constraints     *semver.Constraints
+	client               ctrlruntimeclient.Client
+	workerClient         ctrlruntimeclient.Client
+	userDataManager      *userdatamanager.Manager
+	nodeSettings         machinecontroller.NodeSettings
+	useExternalBootstrap bool
+	namespace            string
+	constraints          *semver.Constraints
 }
 
 var jsonPatch = admissionv1.PatchTypeJSONPatch
 
 type Builder struct {
-	ListenAddress      string
-	Client             ctrlruntimeclient.Client
-	WorkerClient       ctrlruntimeclient.Client
-	UserdataManager    *userdatamanager.Manager
-	NodeFlags          *node.Flags
-	UseOSM             bool
-	Namespace          string
-	VersionConstraints *semver.Constraints
+	ListenAddress        string
+	Client               ctrlruntimeclient.Client
+	WorkerClient         ctrlruntimeclient.Client
+	UserdataManager      *userdatamanager.Manager
+	UseExternalBootstrap bool
+	NodeFlags            *node.Flags
+	Namespace            string
+	VersionConstraints   *semver.Constraints
 }
 
 func (build Builder) Build() (*http.Server, error) {
 	mux := http.NewServeMux()
 	ad := &admissionData{
-		client:          build.Client,
-		workerClient:    build.WorkerClient,
-		userDataManager: build.UserdataManager,
-		useOSM:          build.UseOSM,
-		namespace:       build.Namespace,
-		constraints:     build.VersionConstraints,
+		client:               build.Client,
+		workerClient:         build.WorkerClient,
+		userDataManager:      build.UserdataManager,
+		useExternalBootstrap: build.UseExternalBootstrap,
+		namespace:            build.Namespace,
+		constraints:          build.VersionConstraints,
 	}
 
 	if err := build.NodeFlags.UpdateNodeSettings(&ad.nodeSettings); err != nil {
@@ -181,7 +181,7 @@ func readReview(r *http.Request) (*admissionv1.AdmissionReview, error) {
 	if r.Body == nil {
 		return nil, fmt.Errorf("request has no body")
 	}
-	body, err := ioutil.ReadAll(r.Body)
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		return nil, fmt.Errorf("error reading data from request body: %w", err)
 	}

@@ -23,8 +23,6 @@ import (
 	"strings"
 	"text/template"
 
-	"github.com/Masterminds/semver/v3"
-
 	"github.com/kubermatic/machine-controller/pkg/apis/cluster/common"
 	"github.com/kubermatic/machine-controller/pkg/cloudprovider/util"
 
@@ -138,7 +136,7 @@ var kubeletTLSCipherSuites = []string{
 func withNodeIPFlag(ipFamily util.IPFamily, cloudProvider string, external bool) bool {
 	// If external or in-tree CCM is in use we don't need to set --node-ip
 	// as the cloud provider will know what IPs to return.
-	if ipFamily == util.DualStack {
+	if ipFamily.IsDualstack() {
 		if external || cloudProvider != "" {
 			return false
 		}
@@ -217,10 +215,10 @@ func kubeletConfiguration(clusterDomain string, clusterDNS []net.IP, featureGate
 				ClientCAFile: "/etc/kubernetes/pki/ca.crt",
 			},
 			Webhook: kubeletv1b1.KubeletWebhookAuthentication{
-				Enabled: pointer.BoolPtr(true),
+				Enabled: pointer.Bool(true),
 			},
 			Anonymous: kubeletv1b1.KubeletAnonymousAuthentication{
-				Enabled: pointer.BoolPtr(false),
+				Enabled: pointer.Bool(false),
 			},
 		},
 		Authorization: kubeletv1b1.KubeletAuthorization{
@@ -292,7 +290,7 @@ func kubeletConfiguration(clusterDomain string, clusterDNS []net.IP, featureGate
 			// Instead of breaking the workflow, just print a warning and skip the configuration
 			klog.Warningf("Skipping invalid ContainerLogMaxSize value %v for Kubelet configuration", containerLogMaxFiles)
 		} else {
-			cfg.ContainerLogMaxFiles = pointer.Int32Ptr(int32(maxFiles))
+			cfg.ContainerLogMaxFiles = pointer.Int32(int32(maxFiles))
 		}
 	}
 
@@ -326,35 +324,6 @@ func KubeletFlags(version, cloudProvider, hostname string, dnsIPs []net.IP, exte
 
 	kubeletFlags := make([]string, len(extraKubeletFlags))
 	copy(kubeletFlags, extraKubeletFlags)
-
-	ver, err := semver.NewVersion(version)
-	if err != nil {
-		return "", err
-	}
-	con, err := semver.NewConstraint("< 1.23")
-	if err != nil {
-		return "", err
-	}
-
-	if con.Check(ver) {
-		kubeletFlags = append(kubeletFlags,
-			"--dynamic-config-dir=/etc/kubernetes/dynamic-config-dir",
-			"--feature-gates=DynamicKubeletConfig=true",
-		)
-	}
-
-	// --network-plugin was removed in 1.24 and can only be set for 1.23 or lower
-
-	con, err = semver.NewConstraint("< 1.24")
-	if err != nil {
-		return "", err
-	}
-
-	if con.Check(ver) {
-		kubeletFlags = append(kubeletFlags,
-			"--network-plugin=cni",
-		)
-	}
 
 	data := struct {
 		CloudProvider     string
