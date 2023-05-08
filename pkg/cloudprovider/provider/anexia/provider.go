@@ -96,7 +96,7 @@ func (p *provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine,
 	// ensure conditions are present on machine
 	ensureConditions(&status)
 
-	config, _, err := p.getConfig(ctx, machine.Spec.ProviderSpec)
+	config, providerCfg, err := p.getConfig(ctx, machine.Spec.ProviderSpec)
 	if err != nil {
 		return nil, fmt.Errorf("unable to get provider config: %w", err)
 	}
@@ -121,14 +121,14 @@ func (p *provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine,
 	}()
 
 	// provision machine
-	err = provisionVM(ctx, client)
+	err = provisionVM(ctx, client, providerCfg)
 	if err != nil {
 		return nil, anexiaErrorToTerminalError(err, "failed waiting for vm provisioning")
 	}
 	return p.Get(ctx, machine, data)
 }
 
-func provisionVM(ctx context.Context, client anxclient.Client) error {
+func provisionVM(ctx context.Context, client anxclient.Client, providerCfg *providerconfigtypes.Config) error {
 	reconcileContext := getReconcileContext(ctx)
 	vmAPI := vsphere.NewAPI(client)
 
@@ -165,6 +165,19 @@ func provisionVM(ctx context.Context, client anxclient.Client) error {
 		vm.DiskType = config.Disks[0].PerformanceType
 
 		vm.Script = base64.StdEncoding.EncodeToString([]byte(reconcileContext.UserData))
+
+		for index, dnsServer := range providerCfg.Network.DNS.Servers {
+			switch index {
+			case 0:
+				vm.DNS1 = dnsServer
+			case 1:
+				vm.DNS2 = dnsServer
+			case 2:
+				vm.DNS3 = dnsServer
+			case 3:
+				vm.DNS4 = dnsServer
+			}
+		}
 
 		// We generate a fresh SSH key but will never actually use it - we just want a valid public key to disable password authentication for our fresh VM.
 		sshKey, err := ssh.NewKey()
