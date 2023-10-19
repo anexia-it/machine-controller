@@ -63,6 +63,11 @@ func (ad *admissionData) mutateMachines(ctx context.Context, ar admissionv1.Admi
 		if oldMachine.Spec.Name != machine.Spec.Name && machine.Spec.Name == machine.Name {
 			oldMachine.Spec.Name = machine.Spec.Name
 		}
+
+		// basically allow updating the ProviderID
+		if oldMachine.Spec.ProviderID != machine.Spec.ProviderID {
+			oldMachine.Spec.ProviderID = machine.Spec.ProviderID
+		}
 		// Allow mutation when:
 		// * machine has the `MigrationBypassSpecNoModificationRequirementAnnotation` annotation (used for type migration)
 		bypassValidationForMigration := machine.Annotations[BypassSpecNoModificationRequirementAnnotation] == "true"

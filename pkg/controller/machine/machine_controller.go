@@ -66,6 +66,7 @@ import (
 	"k8s.io/client-go/util/retry"
 	ccmapi "k8s.io/cloud-provider/api"
 	"k8s.io/klog"
+	"k8s.io/utils/pointer"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlruntimeclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -960,6 +961,7 @@ func (r *Reconciler) ensureInstanceExistsForMachine(
 	}
 	if err := r.updateMachine(machine, func(m *clusterv1alpha1.Machine) {
 		m.Status.Addresses = machineAddresses
+		m.Spec.ProviderID = pointer.String(providerInstance.ProviderID())
 	}); err != nil {
 		return nil, fmt.Errorf("failed to update machine after setting .status.addresses: %w", err)
 	}
