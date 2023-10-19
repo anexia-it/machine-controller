@@ -1067,6 +1067,12 @@ func (r *Reconciler) ensureNodeLabelsAnnotationsAndTaints(ctx context.Context, n
 		}
 	}
 
+	if node.Spec.ProviderID == "" && machine.Spec.ProviderID != nil {
+		modifiers = append(modifiers, func(*corev1.Node) {
+			node.Spec.ProviderID = *machine.Spec.ProviderID
+		})
+	}
+
 	if len(modifiers) > 0 {
 		if err := r.updateNode(ctx, node, modifiers...); err != nil {
 			return fmt.Errorf("failed to update node %s after setting labels/annotations/taints: %w", node.Name, err)
