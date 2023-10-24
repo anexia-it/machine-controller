@@ -642,6 +642,10 @@ coreos:
       content: |
         [Unit]
         Wants=rpc-statd.service
+    - name: 51-iscsid.conf
+      content: |
+        [Unit]
+        Wants=iscsid.service
 {{- end }}
     content: |
 {{ kubeletSystemdUnit .ContainerRuntimeName .KubeletVersion .KubeletCloudProviderName .MachineSpec.Name .DNSIPs .ExternalCloudProvider .ProviderSpec.Network.GetIPFamily .PauseImage .MachineSpec.Taints .ExtraKubeletFlags false | indent 6 }}
