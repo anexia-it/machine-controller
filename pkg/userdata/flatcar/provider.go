@@ -646,6 +646,10 @@ coreos:
       content: |
         [Unit]
         Wants=iscsid.service
+    - name: 52-multipathd.conf
+      content: |
+        [Unit]
+        Wants=multipathd.service
 {{- end }}
     content: |
 {{ kubeletSystemdUnit .ContainerRuntimeName .KubeletVersion .KubeletCloudProviderName .MachineSpec.Name .DNSIPs .ExternalCloudProvider .ProviderSpec.Network.GetIPFamily .PauseImage .MachineSpec.Taints .ExtraKubeletFlags false | indent 6 }}
@@ -843,5 +847,14 @@ write_files:
     else
       touch /etc/kubelet_needs_restart
     fi
+{{- end }}
+
+{{- if eq .CloudProviderName "anexia" }}
+- path: /etc/multipath.conf
+  permissions: 0644
+  content: |
+    defaults {
+      find_multipaths no
+    }
 {{- end }}
 `
