@@ -34,11 +34,11 @@ const (
 	GetRequestTimeout    = 1 * time.Minute
 	DeleteRequestTimeout = 1 * time.Minute
 
-	IPStateBound   = "Bound"
-	IPStateUnbound = "Unbound"
-
-	VmxNet3NIC       = "vmxnet3"
-	MachinePoweredOn = "poweredOn"
+	IPStateBound          = "Bound"
+	IPStateUnbound        = "Unbound"
+	IPProvisioningExpires = 1800 * time.Second
+	VmxNet3NIC            = "vmxnet3"
+	MachinePoweredOn      = "poweredOn"
 )
 
 var StatusUpdateFailed = cloudprovidererrors.TerminalError{
@@ -72,12 +72,13 @@ type RawConfig struct {
 }
 
 type ProviderStatus struct {
-	InstanceID       string         `json:"instanceID"`
-	ProvisioningID   string         `json:"provisioningID"`
-	DeprovisioningID string         `json:"deprovisioningID"`
-	ReservedIP       string         `json:"reservedIP"`
-	IPState          string         `json:"ipState"`
-	Conditions       []v1.Condition `json:"conditions,omitempty"`
+	InstanceID            string         `json:"instanceID"`
+	ProvisioningID        string         `json:"provisioningID"`
+	DeprovisioningID      string         `json:"deprovisioningID"`
+	ReservedIP            string         `json:"reservedIP"`
+	IPState               string         `json:"ipState"`
+	IPProvisioningExpires time.Time      `json:"ipProvisioningExpires"`
+	Conditions            []v1.Condition `json:"conditions,omitempty"`
 }
 
 func GetConfig(pconfig providerconfigtypes.Config) (*RawConfig, error) {

@@ -214,7 +214,7 @@ func getIPAddress(ctx context.Context, client anxclient.Client) (string, error) 
 	status := reconcileContext.Status
 
 	// only use IP if it is still unbound
-	if status.ReservedIP != "" && status.IPState == anxtypes.IPStateUnbound {
+	if status.ReservedIP != "" && status.IPState == anxtypes.IPStateUnbound && (!status.IPProvisioningExpires.IsZero() && status.IPProvisioningExpires.After(time.Now())) {
 		klog.Infof("reusing already provisioned ip %q", status.ReservedIP)
 		return status.ReservedIP, nil
 	}
@@ -240,6 +240,7 @@ func getIPAddress(ctx context.Context, client anxclient.Client) (string, error) 
 	ip := res.Data[0].Address
 	status.ReservedIP = ip
 	status.IPState = anxtypes.IPStateUnbound
+	status.IPProvisioningExpires = time.Now().Add(anxtypes.IPProvisioningExpires)
 
 	return ip, nil
 }
