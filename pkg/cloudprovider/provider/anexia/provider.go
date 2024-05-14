@@ -588,7 +588,14 @@ func (p *provider) Cleanup(ctx context.Context, log *zap.SugaredLogger, machine 
 		status.DeprovisioningID = response.Identifier
 	}
 
-	return isTaskDone(deleteCtx, cli, status.DeprovisioningID)
+	done, err := isTaskDone(deleteCtx, cli, status.DeprovisioningID)
+	if err != nil {
+		// let's retry the deprovisioning
+		status.DeprovisioningID = ""
+		return false, err
+	}
+
+	return done, nil
 }
 
 func isTaskDone(ctx context.Context, cli anxclient.Client, progressIdentifier string) (bool, error) {
