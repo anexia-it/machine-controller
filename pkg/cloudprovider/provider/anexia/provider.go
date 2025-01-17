@@ -352,21 +352,26 @@ func (p *provider) Get(ctx context.Context, log *zap.SugaredLogger, machine *clu
 	}
 
 	if status.InstanceID == "" {
-		progress, err := vsphereAPI.Provisioning().Progress().Get(ctx, status.ProvisioningID)
+		p, err := vsphereAPI.Provisioning().Progress().Get(ctx, status.ProvisioningID)
 		if err != nil {
 			return nil, anexiaErrorToTerminalError(err, "failed to get provisioning progress")
 		}
-		if len(progress.Errors) > 0 {
-			return nil, fmt.Errorf("vm provisioning had errors: %s", strings.Join(progress.Errors, ","))
-		}
-		if progress.Progress < 100 || progress.VMIdentifier == "" {
+
+		switch p.Status {
+		// First, check whether the request is successful. We have to do this ahead of the error checking,
+		// because the errors field does not seem to get cleared if the same provisioning task was successful
+		// in the next run.
+		//
+		// See also: VSD-1473
+		case progress.StatusSuccess:
+			status.InstanceID = p.VMIdentifier
+			if err := updateMachineStatus(machine, status, pd.Update); err != nil {
+				return nil, fmt.Errorf("failed updating machine status: %w", err)
+			}
+		case progress.StatusFailed:
+			return nil, fmt.Errorf("vm provisioning had errors: %s", strings.Join(p.Errors, ","))
+		case progress.StatusInProgress:
 			return &anexiaInstance{isCreating: true}, nil
-		}
-
-		status.InstanceID = progress.VMIdentifier
-
-		if err := updateMachineStatus(machine, status, pd.Update); err != nil {
-			return nil, fmt.Errorf("failed updating machine status: %w", err)
 		}
 	}
 
@@ -456,16 +461,18 @@ func isTaskDone(ctx context.Context, cli anxclient.Client, progressIdentifier st
 		return false, err
 	}
 
-	if len(response.Errors) != 0 {
+	switch response.Status {
+	case progress.StatusSuccess:
+		return true, nil
+	case progress.StatusInProgress:
+		return false, nil
+	case progress.StatusCancelled,
+		progress.StatusFailed:
 		taskErrors, _ := json.Marshal(response.Errors)
 		return true, fmt.Errorf("task failed with: %s", taskErrors)
+	default:
+		panic(fmt.Sprintf("unexpected progress.Status: %#v", response.Status))
 	}
-
-	if response.Progress == 100 {
-		return true, nil
-	}
-
-	return false, nil
 }
 
 func (p *provider) MigrateUID(_ context.Context, _ *zap.SugaredLogger, _ *clusterv1alpha1.Machine, _ k8stypes.UID) error {
