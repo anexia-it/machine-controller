@@ -434,6 +434,17 @@ storage:
           fi
 {{- end }}
 
+{{- if eq .CloudProviderName "anexia" }}
+    - path: /etc/systemd/timesyncd.conf
+      mode: 0644
+      contents:
+        inline: |
+          # ANXKUBE-1356 made us realise that we have to use our custom NTP servers,
+          # because the official Flatcar ones might be blocked by a firewall.
+          [Time]
+          NTP=ntp0101.anexia-it.net ntp0401.anexia-it.net ntp8201.anexia-it.net
+{{- end }}
+
     - path: /etc/ssh/sshd_config
       filesystem: root
       mode: 0600
@@ -848,5 +859,14 @@ write_files:
     else
       touch /etc/kubelet_needs_restart
     fi
+{{- end }}
+{{- if eq .CloudProviderName "anexia" }}
+- path: "/etc/systemd/timesyncd.conf"
+  permissions: 0644
+  content: |
+    # ANXKUBE-1356 made us realise that we have to use our custom NTP servers,
+    # because the official Flatcar ones might be blocked by a firewall.
+    [Time]
+    NTP=ntp0101.anexia-it.net ntp0401.anexia-it.net ntp8201.anexia-it.net
 {{- end }}
 `
