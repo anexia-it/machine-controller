@@ -662,6 +662,14 @@ coreos:
       content: |
         [Unit]
         Wants=rpc-statd.service
+
+    # ANXKUBE-1353: Some machines apparently do not have their sysctl settings
+    # set correctly. In order to ensure that the sysctl adjustments are applied
+    # properly, we depend on the sysctl unit for kubelet here.
+    - name: 60-sysctl-settings.conf
+      content: |
+        [Unit]
+        Wants=apply-sysctl-settings.service
 {{- end }}
     content: |
 {{ kubeletSystemdUnit .ContainerRuntimeName .KubeletVersion .KubeletCloudProviderName .MachineSpec.Name .DNSIPs .ExternalCloudProvider .ProviderSpec.Network.GetIPFamily .PauseImage .MachineSpec.Taints .ExtraKubeletFlags false | indent 6 }}
