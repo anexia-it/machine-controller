@@ -592,7 +592,7 @@ coreos:
 {{- end }}
 {{- if .HTTPProxy }}
   - name: update-engine.service
-    drop-ins:
+    drop_ins:
     - name: 50-proxy.conf
       content: |
         [Service]
@@ -615,7 +615,7 @@ coreos:
   - name: kubelet-healthcheck.service
     enable: true
     command: start
-    drop-ins:
+    drop_ins:
     - name: 40-download.conf
       content: |
         [Unit]
@@ -643,7 +643,7 @@ coreos:
   - name: kubelet.service
     enable: true
     command: start
-    drop-ins:
+    drop_ins:
     - name: 10-nodeip.conf
       content: |
         [Service]
