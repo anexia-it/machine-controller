@@ -234,6 +234,33 @@ func ensureConditions(status *anxtypes.ProviderStatus) {
 	}
 }
 
+// getTokenFromSpec got extracted from getConfig in order to circumvent it.
+//
+// That allowed us to reduce [Cleanup] to the bare minimum and allowing tear
+// downs if the template no longer exists. (ANXKUBE-1361)
+func (p *provider) getTokenFromSpec(spec clusterv1alpha1.ProviderSpec) (string, error) {
+	if spec.Value == nil {
+		return "", fmt.Errorf("machine.spec.providerSpec.value is nil")
+	}
+
+	pconfig, err := providerconfigtypes.GetConfig(spec)
+	if err != nil {
+		return "", err
+	}
+
+	rawConfig, err := anxtypes.GetConfig(*pconfig)
+	if err != nil {
+		return "", fmt.Errorf("error parsing provider config: %w", err)
+	}
+
+	token, err := p.configVarResolver.GetConfigVarStringValueOrEnv(rawConfig.Token, anxtypes.AnxTokenEnv)
+	if err != nil {
+		return "", fmt.Errorf("failed to get 'token': %w", err)
+	}
+
+	return token, nil
+}
+
 func (p *provider) getConfig(ctx context.Context, log *zap.SugaredLogger, provSpec clusterv1alpha1.ProviderSpec) (*resolvedConfig, *providerconfigtypes.Config, error) {
 	if provSpec.Value == nil {
 		return nil, nil, fmt.Errorf("machine.spec.providerSpec.value is nil")
@@ -326,12 +353,12 @@ func (p *provider) Validate(ctx context.Context, log *zap.SugaredLogger, machine
 }
 
 func (p *provider) Get(ctx context.Context, log *zap.SugaredLogger, machine *clusterv1alpha1.Machine, pd *cloudprovidertypes.ProviderData) (instance.Instance, error) {
-	config, _, err := p.getConfig(ctx, log, machine.Spec.ProviderSpec)
+	token, err := p.getTokenFromSpec(machine.Spec.ProviderSpec)
 	if err != nil {
-		return nil, newError(common.InvalidConfigurationMachineError, "failed to retrieve config: %v", err)
+		return nil, newError(common.InvalidConfigurationMachineError, "querying token: %v", err)
 	}
 
-	_, cli, err := getClient(config.Token, &machine.Name)
+	_, cli, err := getClient(token, &machine.Name)
 	if err != nil {
 		return nil, newError(common.InvalidConfigurationMachineError, "failed to create Anexia client: %v", err)
 	}
@@ -414,12 +441,12 @@ func (p *provider) Cleanup(ctx context.Context, log *zap.SugaredLogger, machine 
 	}()
 
 	ensureConditions(&status)
-	config, _, err := p.getConfig(ctx, log, machine.Spec.ProviderSpec)
+	token, err := p.getTokenFromSpec(machine.Spec.ProviderSpec)
 	if err != nil {
-		return false, newError(common.InvalidConfigurationMachineError, "failed to parse MachineSpec: %v", err)
+		return false, fmt.Errorf("querying token from MachineSpec failed: %w", err)
 	}
 
-	_, cli, err := getClient(config.Token, &machine.Name)
+	_, cli, err := getClient(token, &machine.Name)
 	if err != nil {
 		return false, newError(common.InvalidConfigurationMachineError, "failed to create Anexia client: %v", err)
 	}
