@@ -110,7 +110,7 @@ func TestAnexiaProvider(t *testing.T) {
 					networkArray := jsonBody["network"].([]interface{})
 					networkObject := networkArray[0].(jsonObject)
 					testhelper.AssertEquals(t, networkObject["vlan"], "VLAN-ID")
-					testhelper.AssertEquals(t, networkObject["nic_type"], "vmxnet3")
+					testhelper.AssertEquals(t, networkObject["nic_type"], "virtio")
 					testhelper.AssertEquals(t, networkObject["ips"].([]interface{})[0], "8.8.8.8")
 				},
 			},
@@ -373,6 +373,7 @@ func TestValidate(t *testing.T) {
 	provider := New(configvar.NewResolver(context.Background(), fake.NewClientBuilder().Build()))
 	for _, testCase := range getSpecsForValidationTest(t, configCases) {
 		err := provider.Validate(context.Background(), zap.NewNop().Sugar(), testCase.Spec)
+		t.Logf("testing config case with expected err: %s", testCase.ExpectedError.Error())
 		if testCase.ExpectedError != nil {
 			if !errors.Is(err, testCase.ExpectedError) {
 				testhelper.AssertEquals(t, testCase.ExpectedError.Error(), err.Error())
