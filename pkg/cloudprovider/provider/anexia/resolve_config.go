@@ -37,14 +37,14 @@ type resolvedDisk struct {
 
 // resolvedNetwork contains the resolved values from types.RawNetwork.
 type resolvedNetwork struct {
-	anxtypes.RawNetwork
-
 	VlanID string
 
 	// List of prefixes to each reserve an IP address from.
 	//
 	// Legacy compatibility: may contain an empty string as entry to reserve an IP address from the given VLAN instead of a specific prefix.
 	Prefixes []string
+
+	BandwidthLimit int
 }
 
 // resolvedConfig contains the resolved values from types.RawConfig.
@@ -117,13 +117,28 @@ func (p *provider) resolveNetworkConfig(log *zap.SugaredLogger, config anxtypes.
 			prefixes[prefixIndex] = prefixID
 		}
 
+		bandwidthLimit, err := p.resolveBandwidthLimitConfig(net)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse bandwidth limit: %w", err)
+		}
+
 		ret[netIndex] = resolvedNetwork{
-			VlanID:   vlanID,
-			Prefixes: prefixes,
+			VlanID:         vlanID,
+			Prefixes:       prefixes,
+			BandwidthLimit: bandwidthLimit,
 		}
 	}
 
 	return &ret, nil
+}
+
+func (p *provider) resolveBandwidthLimitConfig(config anxtypes.RawNetwork) (int, error) {
+	switch config.BandwidthLimit {
+	case 0, 100, 1_000, 10_000:
+		return config.BandwidthLimit, nil
+	default:
+		return 0, fmt.Errorf("bandwidthLimit %d invalid, needs to be one of: 0, 100, 1000, 10000", config.BandwidthLimit)
+	}
 }
 
 func (p *provider) resolveDiskConfig(log *zap.SugaredLogger, config anxtypes.RawConfig) (*[]resolvedDisk, error) {

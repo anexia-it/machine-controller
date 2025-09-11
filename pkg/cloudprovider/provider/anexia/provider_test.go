@@ -145,6 +145,17 @@ func TestAnexiaProvider(t *testing.T) {
 					testhelper.AssertJSONEquals(t, `[{"gb":10,"type":"STD1"}]`, jsonBody["additional_disks"])
 				},
 			},
+			{
+				// Provision a generic VM with an increased bandwidth limit
+				ReconcileContext: hookableReconcileContext("LOCATION-ID", "INCREASED-BANDWIDTH-LIMIT", func(rc *reconcileContext) {
+					rc.Config.Networks[0].BandwidthLimit = 10000
+				}),
+				AssertJSONBody: func(jsonBody jsonObject) {
+					networkArray := jsonBody["network"].([]any)
+					networkObject := networkArray[0].(jsonObject)
+					testhelper.AssertEquals(t, json.Number("10000"), networkObject["bandwidth_limit"])
+				},
+			},
 		}
 
 		testhelper.Mux.HandleFunc("/api/ipam/v1/address/reserve/ip/count.json", func(writer http.ResponseWriter, _ *http.Request) {
@@ -198,6 +209,56 @@ func TestAnexiaProvider(t *testing.T) {
 
 			err := provisionVM(ctx, log, client)
 			testhelper.AssertNoErr(t, err)
+		}
+	})
+
+	t.Run("Test resolve network", func(t *testing.T) {
+		t.Parallel()
+
+		type testCase struct {
+			config                        anxtypes.RawConfig
+			expectedError                 string
+			expectedNetworkBandwidthLimit int
+		}
+
+		testCases := []testCase{
+			{
+				// With named template and not latest build
+				config: hookableConfig(func(c *anxtypes.RawConfig) {
+					c.Networks = []anxtypes.RawNetwork{
+						anxtypes.RawNetwork{
+							VlanID: providerconfigtypes.ConfigVarString{
+								Value: "17825213",
+							},
+							PrefixIDs: []providerconfigtypes.ConfigVarString{
+								providerconfigtypes.ConfigVarString{
+									Value: "0987654",
+								},
+							},
+							BandwidthLimit: 10000,
+						},
+					}
+				}),
+				expectedError:                 "",
+				expectedNetworkBandwidthLimit: 10000,
+			},
+		}
+
+		provider := New(configvar.NewResolver(context.Background(), fake.NewClientBuilder().Build())).(*provider)
+		for _, testCase := range testCases {
+			resolvedNetworks, err := provider.resolveNetworkConfig(log, testCase.config)
+			if testCase.expectedError != "" {
+				if err != nil {
+					testhelper.AssertErr(t, err)
+					testhelper.AssertEquals(t, true, strings.Contains(err.Error(), testCase.expectedError))
+					continue
+				}
+			} else {
+				testhelper.AssertNoErr(t, err)
+				for _, network := range *resolvedNetworks {
+					testhelper.AssertEquals(t, testCase.expectedNetworkBandwidthLimit, network.BandwidthLimit)
+				}
+			}
 		}
 	})
 
