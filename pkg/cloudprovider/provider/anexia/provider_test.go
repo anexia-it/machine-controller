@@ -224,6 +224,20 @@ func TestAnexiaProvider(t *testing.T) {
 
 		testCases := []testCase{
 			{
+				// Failing to parse should mention the reason
+				config: hookableConfig(func(c *anxtypes.RawConfig) {
+					c.Networks = []anxtypes.RawNetwork{
+						{
+							VlanID:         providerconfigtypes.ConfigVarString{Value: "17825213"},
+							PrefixIDs:      []providerconfigtypes.ConfigVarString{{Value: "0987654"}},
+							BandwidthLimit: 19,
+						},
+					}
+				}),
+				expectedError:   "failed to parse bandwidth limit",
+				expectedNetwork: []resolvedNetwork{},
+			},
+			{
 				// Without Bandwidth specified
 				config: hookableConfig(func(c *anxtypes.RawConfig) {
 					c.Networks = []anxtypes.RawNetwork{
