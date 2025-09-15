@@ -68,7 +68,7 @@ type RawNetwork struct {
 	// Bandwidth limit in MBit/s on the network interface. Allowed values are: 100, 1000, 10000.
 	//
 	// If unset, the default value from the Anexia Engine is used, which is usually 1000.
-	BandwidthLimit int `json:"bandwidthLimit"`
+	BandwidthLimit int `json:"bandwidthLimit,omitempty"`
 }
 
 // RawConfig contains all the configuration values for VMs to create, with some values maybe being fetched from secrets.

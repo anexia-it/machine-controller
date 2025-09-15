@@ -219,28 +219,48 @@ func TestAnexiaProvider(t *testing.T) {
 			config                        anxtypes.RawConfig
 			expectedError                 string
 			expectedNetworkBandwidthLimit int
+			expectedNetwork               []resolvedNetwork
 		}
 
 		testCases := []testCase{
 			{
-				// With named template and not latest build
+				// Without Bandwidth specified
 				config: hookableConfig(func(c *anxtypes.RawConfig) {
 					c.Networks = []anxtypes.RawNetwork{
-						anxtypes.RawNetwork{
-							VlanID: providerconfigtypes.ConfigVarString{
-								Value: "17825213",
-							},
-							PrefixIDs: []providerconfigtypes.ConfigVarString{
-								providerconfigtypes.ConfigVarString{
-									Value: "0987654",
-								},
-							},
+						{
+							VlanID:    providerconfigtypes.ConfigVarString{Value: "17825213"},
+							PrefixIDs: []providerconfigtypes.ConfigVarString{{Value: "0987654"}},
+						},
+					}
+				}),
+				expectedError: "",
+				expectedNetwork: []resolvedNetwork{
+					{
+						VlanID:         "17825213",
+						Prefixes:       []string{"0987654"},
+						BandwidthLimit: 0,
+					},
+				},
+			},
+			{
+				// With one valid network
+				config: hookableConfig(func(c *anxtypes.RawConfig) {
+					c.Networks = []anxtypes.RawNetwork{
+						{
+							VlanID:         providerconfigtypes.ConfigVarString{Value: "17825213"},
+							PrefixIDs:      []providerconfigtypes.ConfigVarString{{Value: "0987654"}},
 							BandwidthLimit: 10000,
 						},
 					}
 				}),
-				expectedError:                 "",
-				expectedNetworkBandwidthLimit: 10000,
+				expectedError: "",
+				expectedNetwork: []resolvedNetwork{
+					{
+						VlanID:         "17825213",
+						Prefixes:       []string{"0987654"},
+						BandwidthLimit: 10000,
+					},
+				},
 			},
 		}
 
@@ -248,15 +268,17 @@ func TestAnexiaProvider(t *testing.T) {
 		for _, testCase := range testCases {
 			resolvedNetworks, err := provider.resolveNetworkConfig(log, testCase.config)
 			if testCase.expectedError != "" {
-				if err != nil {
-					testhelper.AssertErr(t, err)
-					testhelper.AssertEquals(t, true, strings.Contains(err.Error(), testCase.expectedError))
-					continue
-				}
+				testhelper.AssertErr(t, err)
+				testhelper.AssertEquals(t, true, strings.Contains(err.Error(), testCase.expectedError))
+				continue
 			} else {
 				testhelper.AssertNoErr(t, err)
-				for _, network := range *resolvedNetworks {
-					testhelper.AssertEquals(t, testCase.expectedNetworkBandwidthLimit, network.BandwidthLimit)
+				for ni, network := range *resolvedNetworks {
+					testhelper.AssertEquals(t, testCase.expectedNetwork[ni].VlanID, network.VlanID)
+					for pi, prefix := range network.Prefixes {
+						testhelper.AssertEquals(t, testCase.expectedNetwork[ni].Prefixes[pi], prefix)
+					}
+					testhelper.AssertEquals(t, testCase.expectedNetwork[ni].BandwidthLimit, network.BandwidthLimit)
 				}
 			}
 		}
