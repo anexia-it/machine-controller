@@ -31,12 +31,15 @@ spec:
                 name: machine-controller-anexia
                 key: token
 
-            # Currently only the "Flatcar Linux Stable" template is supported.
+            # Currently only the "Flatcar Linux Stable UEFI" template is supported.
             # Use templateBuild to specify a build. If empty => latest
             # Alternatively use templateID for a specific template.
             template: "<< ANEXIA_TEMPLATE_NAME >>"
             locationID: "<< ANEXIA_LOCATION_ID >>"
+
+            # From 1 to 16 cores or the configured limit for your account.
             cpus: 2
+            # From 1024 to 65536 MB or the configured limit for your account.
             memory: 2048
 
             # this defaults to "performance", but you can set anything
@@ -46,6 +49,10 @@ spec:
 
             disks:
               - size: 60
+                # Enterprise ENT1-6
+                # High Performance HPC1-5
+                # Local LOC3
+                # Standard STD1-6
                 performanceType: ENT6
 
             # Each entry in this array will create a network interface in each
@@ -71,6 +78,11 @@ spec:
                 # at least one IP address for each Machine.
                 prefixes:
                   - "<< ANEXIA_PREFIX_ID >>"
+
+                # (optional) BandwidthLimit specifices the allowed bandwidth in MBit/s.
+                # It can be set to 0, 100, 1000 or 10000 for the respective values of 100MBit/s 1GBit/s or 10GBit/s.
+                # It defaults to 0 which will take the default value of the anexia engine. This is 1GB/s.
+                bandwidthLimit: 0
 
             # You may have this old disk config attribute in your config - please migrate to the disks attribute.
             # For now it is still recognized though.

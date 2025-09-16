@@ -110,7 +110,7 @@ func TestAnexiaProvider(t *testing.T) {
 					networkArray := jsonBody["network"].([]interface{})
 					networkObject := networkArray[0].(jsonObject)
 					testhelper.AssertEquals(t, networkObject["vlan"], "VLAN-ID")
-					testhelper.AssertEquals(t, networkObject["nic_type"], "vmxnet3")
+					testhelper.AssertEquals(t, networkObject["nic_type"], "virtio")
 					testhelper.AssertEquals(t, networkObject["ips"].([]interface{})[0], "8.8.8.8")
 				},
 			},
@@ -143,6 +143,17 @@ func TestAnexiaProvider(t *testing.T) {
 				AssertJSONBody: func(jsonBody jsonObject) {
 					testhelper.AssertEquals(t, json.Number("5"), jsonBody["disk_gb"])
 					testhelper.AssertJSONEquals(t, `[{"gb":10,"type":"STD1"}]`, jsonBody["additional_disks"])
+				},
+			},
+			{
+				// Provision a generic VM with an increased bandwidth limit
+				ReconcileContext: hookableReconcileContext("LOCATION-ID", "INCREASED-BANDWIDTH-LIMIT", func(rc *reconcileContext) {
+					rc.Config.Networks[0].BandwidthLimit = 10000
+				}),
+				AssertJSONBody: func(jsonBody jsonObject) {
+					networkArray := jsonBody["network"].([]any)
+					networkObject := networkArray[0].(jsonObject)
+					testhelper.AssertEquals(t, json.Number("10000"), networkObject["bandwidth_limit"])
 				},
 			},
 		}
@@ -198,6 +209,92 @@ func TestAnexiaProvider(t *testing.T) {
 
 			err := provisionVM(ctx, log, client)
 			testhelper.AssertNoErr(t, err)
+		}
+	})
+
+	t.Run("Test resolve network", func(t *testing.T) {
+		t.Parallel()
+
+		type testCase struct {
+			config                        anxtypes.RawConfig
+			expectedError                 string
+			expectedNetworkBandwidthLimit int
+			expectedNetwork               []resolvedNetwork
+		}
+
+		testCases := []testCase{
+			{
+				// Failing to parse should mention the reason
+				config: hookableConfig(func(c *anxtypes.RawConfig) {
+					c.Networks = []anxtypes.RawNetwork{
+						{
+							VlanID:         providerconfigtypes.ConfigVarString{Value: "17825213"},
+							PrefixIDs:      []providerconfigtypes.ConfigVarString{{Value: "0987654"}},
+							BandwidthLimit: 19,
+						},
+					}
+				}),
+				expectedError:   "failed to parse bandwidth limit",
+				expectedNetwork: []resolvedNetwork{},
+			},
+			{
+				// Without Bandwidth specified
+				config: hookableConfig(func(c *anxtypes.RawConfig) {
+					c.Networks = []anxtypes.RawNetwork{
+						{
+							VlanID:    providerconfigtypes.ConfigVarString{Value: "17825213"},
+							PrefixIDs: []providerconfigtypes.ConfigVarString{{Value: "0987654"}},
+						},
+					}
+				}),
+				expectedError: "",
+				expectedNetwork: []resolvedNetwork{
+					{
+						VlanID:         "17825213",
+						Prefixes:       []string{"0987654"},
+						BandwidthLimit: 0,
+					},
+				},
+			},
+			{
+				// With one valid network
+				config: hookableConfig(func(c *anxtypes.RawConfig) {
+					c.Networks = []anxtypes.RawNetwork{
+						{
+							VlanID:         providerconfigtypes.ConfigVarString{Value: "17825213"},
+							PrefixIDs:      []providerconfigtypes.ConfigVarString{{Value: "0987654"}},
+							BandwidthLimit: 10000,
+						},
+					}
+				}),
+				expectedError: "",
+				expectedNetwork: []resolvedNetwork{
+					{
+						VlanID:         "17825213",
+						Prefixes:       []string{"0987654"},
+						BandwidthLimit: 10000,
+					},
+				},
+			},
+		}
+
+		provider := New(configvar.NewResolver(context.Background(), fake.NewClientBuilder().Build())).(*provider)
+		for _, testCase := range testCases {
+			resolvedNetworks, err := provider.resolveNetworkConfig(log, testCase.config)
+			if testCase.expectedError != "" {
+				testhelper.AssertErr(t, err)
+				testhelper.AssertEquals(t, true, strings.Contains(err.Error(), testCase.expectedError))
+				continue
+			} else {
+				testhelper.AssertNoErr(t, err)
+				for ni, network := range *resolvedNetworks {
+					testhelper.AssertEquals(t, testCase.expectedNetwork[ni].VlanID, network.VlanID)
+					for pi, prefix := range network.Prefixes {
+						testhelper.AssertEquals(t, testCase.expectedNetwork[ni].Prefixes[pi], prefix)
+					}
+					testhelper.AssertEquals(t, testCase.expectedNetwork[ni].BandwidthLimit, network.BandwidthLimit)
+				}
+			}
 		}
 	})
 
@@ -373,6 +470,7 @@ func TestValidate(t *testing.T) {
 	provider := New(configvar.NewResolver(context.Background(), fake.NewClientBuilder().Build()))
 	for _, testCase := range getSpecsForValidationTest(t, configCases) {
 		err := provider.Validate(context.Background(), zap.NewNop().Sugar(), testCase.Spec)
+		t.Logf("testing config case with expected err: %s", testCase.ExpectedError.Error())
 		if testCase.ExpectedError != nil {
 			if !errors.Is(err, testCase.ExpectedError) {
 				testhelper.AssertEquals(t, testCase.ExpectedError.Error(), err.Error())
