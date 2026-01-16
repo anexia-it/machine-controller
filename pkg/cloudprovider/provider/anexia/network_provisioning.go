@@ -73,11 +73,10 @@ func networkInterfacesForProvisioning(ctx context.Context, log *zap.SugaredLogge
 		}
 
 		ret[netIndex] = anxvm.Network{
-			VLAN: network.VlanID,
-			IPs:  addresses,
-
-			// the one NIC type supported by the ADC API
-			NICType: anxtypes.VmxNet3NIC,
+			VLAN:           network.VlanID,
+			IPs:            addresses,
+			NICType:        anxtypes.VirtioNIC,
+			BandwidthLimit: network.BandwidthLimit,
 		}
 	}
 

@@ -37,7 +37,7 @@ const (
 	IPStateUnbound        = "Unbound"
 	IPProvisioningExpires = 1800 * time.Second
 
-	VmxNet3NIC       = "vmxnet3"
+	VirtioNIC        = "virtio"
 	MachinePoweredOn = "poweredOn"
 )
 
@@ -64,6 +64,11 @@ type RawNetwork struct {
 	//
 	// Empty list means that no IPs will be reserved, but the interface will still be added.
 	PrefixIDs []providerconfig.ConfigVarString `json:"prefixes"`
+
+	// Bandwidth limit in MBit/s on the network interface. Allowed values are: 100, 1000, 10000.
+	//
+	// If unset, the default value from the Anexia Engine is used, which is usually 1000.
+	BandwidthLimit int `json:"bandwidthLimit,omitempty"`
 }
 
 // RawConfig contains all the configuration values for VMs to create, with some values maybe being fetched from secrets.

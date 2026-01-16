@@ -225,6 +225,33 @@ func ensureConditions(status *anxtypes.ProviderStatus) {
 	}
 }
 
+// getTokenFromSpec got extracted from getConfig in order to circumvent it.
+//
+// That allowed us to reduce [Cleanup] to the bare minimum and allowing tear
+// downs if the template no longer exists. (ANXKUBE-1361)
+func (p *provider) getTokenFromSpec(spec clusterv1alpha1.ProviderSpec) (string, error) {
+	if spec.Value == nil {
+		return "", fmt.Errorf("machine.spec.providerSpec.value is nil")
+	}
+
+	pconfig, err := providerconfig.GetConfig(spec)
+	if err != nil {
+		return "", err
+	}
+
+	rawConfig, err := anxtypes.GetConfig(*pconfig)
+	if err != nil {
+		return "", fmt.Errorf("error parsing provider config: %w", err)
+	}
+
+	token, err := p.configVarResolver.GetStringValueOrEnv(rawConfig.Token, anxtypes.AnxTokenEnv)
+	if err != nil {
+		return "", fmt.Errorf("failed to get 'token': %w", err)
+	}
+
+	return token, nil
+}
+
 func (p *provider) getConfig(ctx context.Context, log *zap.SugaredLogger, provSpec clusterv1alpha1.ProviderSpec) (*resolvedConfig, *providerconfig.Config, error) {
 	pconfig, err := providerconfig.GetConfig(provSpec)
 	if err != nil {
@@ -314,12 +341,12 @@ func (p *provider) Validate(ctx context.Context, log *zap.SugaredLogger, machine
 }
 
 func (p *provider) Get(ctx context.Context, log *zap.SugaredLogger, machine *clusterv1alpha1.Machine, pd *cloudprovidertypes.ProviderData) (instance.Instance, error) {
-	config, _, err := p.getConfig(ctx, log, machine.Spec.ProviderSpec)
+	token, err := p.getTokenFromSpec(machine.Spec.ProviderSpec)
 	if err != nil {
-		return nil, newError(common.InvalidConfigurationMachineError, "failed to retrieve config: %v", err)
+		return nil, newError(common.InvalidConfigurationMachineError, "querying token: %v", err)
 	}
 
-	_, cli, err := getClient(config.Token, &machine.Name)
+	_, cli, err := getClient(token, &machine.Name)
 	if err != nil {
 		return nil, newError(common.InvalidConfigurationMachineError, "failed to create Anexia client: %v", err)
 	}
@@ -337,21 +364,26 @@ func (p *provider) Get(ctx context.Context, log *zap.SugaredLogger, machine *clu
 	}
 
 	if status.InstanceID == "" {
-		progress, err := vsphereAPI.Provisioning().Progress().Get(ctx, status.ProvisioningID)
+		p, err := vsphereAPI.Provisioning().Progress().Get(ctx, status.ProvisioningID)
 		if err != nil {
 			return nil, anexiaErrorToTerminalError(err, "failed to get provisioning progress")
 		}
-		if len(progress.Errors) > 0 {
-			return nil, fmt.Errorf("vm provisioning had errors: %s", strings.Join(progress.Errors, ","))
-		}
-		if progress.Progress < 100 || progress.VMIdentifier == "" {
+
+		switch p.Status {
+		// First, check whether the request is successful. We have to do this ahead of the error checking,
+		// because the errors field does not seem to get cleared if the same provisioning task was successful
+		// in the next run.
+		//
+		// See also: VSD-1473
+		case progress.StatusSuccess:
+			status.InstanceID = p.VMIdentifier
+			if err := updateMachineStatus(machine, status, pd.Update); err != nil {
+				return nil, fmt.Errorf("failed updating machine status: %w", err)
+			}
+		case progress.StatusFailed:
+			return nil, fmt.Errorf("vm provisioning had errors: %s", strings.Join(p.Errors, ","))
+		case progress.StatusInProgress:
 			return &anexiaInstance{isCreating: true}, nil
-		}
-
-		status.InstanceID = progress.VMIdentifier
-
-		if err := updateMachineStatus(machine, status, pd.Update); err != nil {
-			return nil, fmt.Errorf("failed updating machine status: %w", err)
 		}
 	}
 
@@ -390,12 +422,12 @@ func (p *provider) Cleanup(ctx context.Context, log *zap.SugaredLogger, machine 
 	}()
 
 	ensureConditions(&status)
-	config, _, err := p.getConfig(ctx, log, machine.Spec.ProviderSpec)
+	token, err := p.getTokenFromSpec(machine.Spec.ProviderSpec)
 	if err != nil {
-		return false, newError(common.InvalidConfigurationMachineError, "failed to parse MachineSpec: %v", err)
+		return false, fmt.Errorf("querying token from MachineSpec failed: %w", err)
 	}
 
-	_, cli, err := getClient(config.Token, &machine.Name)
+	_, cli, err := getClient(token, &machine.Name)
 	if err != nil {
 		return false, newError(common.InvalidConfigurationMachineError, "failed to create Anexia client: %v", err)
 	}
@@ -437,16 +469,18 @@ func isTaskDone(ctx context.Context, cli anxclient.Client, progressIdentifier st
 		return false, err
 	}
 
-	if len(response.Errors) != 0 {
+	switch response.Status {
+	case progress.StatusSuccess:
+		return true, nil
+	case progress.StatusInProgress:
+		return false, nil
+	case progress.StatusCancelled,
+		progress.StatusFailed:
 		taskErrors, _ := json.Marshal(response.Errors)
 		return true, fmt.Errorf("task failed with: %s", taskErrors)
+	default:
+		panic(fmt.Sprintf("unexpected progress.Status: %#v", response.Status))
 	}
-
-	if response.Progress == 100 {
-		return true, nil
-	}
-
-	return false, nil
 }
 
 func (p *provider) MigrateUID(_ context.Context, _ *zap.SugaredLogger, _ *clusterv1alpha1.Machine, _ k8stypes.UID) error {
