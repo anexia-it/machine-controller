@@ -418,66 +418,90 @@ func TestAnexiaProvider(t *testing.T) {
 func TestValidate(t *testing.T) {
 	t.Parallel()
 
-	var configCases []ConfigTestCase
-	configCases = append(configCases,
-		ConfigTestCase{
+	configCases := []ConfigTestCase{
+		{
+			Name:   "no token",
 			Config: hookableConfig(func(c *anxtypes.RawConfig) { c.Token.Value = "" }),
 			Error:  errors.New("token not set"),
 		},
-		ConfigTestCase{
+		{
+			Name:   "no cpu count",
 			Config: hookableConfig(func(c *anxtypes.RawConfig) { c.CPUs = 0 }),
 			Error:  errors.New("cpu count is missing"),
 		},
-		ConfigTestCase{
-			Config: hookableConfig(func(c *anxtypes.RawConfig) { c.Disks = []anxtypes.RawDisk{} }),
-			Error:  errors.New("no disks configured"),
-		},
-		ConfigTestCase{
-			Config: hookableConfig(func(c *anxtypes.RawConfig) { c.DiskSize = 10 }),
-			Error:  anxtypes.ErrConfigDiskSizeAndDisks,
-		},
-		ConfigTestCase{
-			Config: hookableConfig(func(c *anxtypes.RawConfig) { c.Disks[0].Size = 0 }),
+		{
+			Name:   "no disk size",
+			Config: hookableConfig(func(c *anxtypes.RawConfig) { c.DiskSize = 0 }),
 			Error:  errors.New("disk size is missing"),
 		},
-		ConfigTestCase{
+		{
+			Name:   "no disk performance type",
+			Config: hookableConfig(func(c *anxtypes.RawConfig) { c.DiskPerformanceType = "" }),
+			Error:  errors.New("disk performance type is missing"),
+		},
+		{
+			Name:   "no cpu performance type",
+			Config: hookableConfig(func(c *anxtypes.RawConfig) { c.CPUPerformanceType = "" }),
+			Error:  errors.New("cpu performance type is missing"),
+		},
+		{
+			Name:   "no disk size for additional disk disk",
+			Config: hookableConfig(func(c *anxtypes.RawConfig) { c.Disks[0].Size = 0 }),
+			Error:  errors.New("disk size for disk 0 is missing"),
+		},
+		{
+			Name:   "no disk performance type for additional disk disk",
+			Config: hookableConfig(func(c *anxtypes.RawConfig) { c.Disks[0].PerformanceType.Value = "" }),
+			Error:  errors.New("disk performance type for disk 0 is missing"),
+		},
+		{
+			Name:   "no memory",
 			Config: hookableConfig(func(c *anxtypes.RawConfig) { c.Memory = 0 }),
 			Error:  errors.New("memory size is missing"),
 		},
-		ConfigTestCase{
+		{
+			Name:   "no location id",
 			Config: hookableConfig(func(c *anxtypes.RawConfig) { c.LocationID.Value = "" }),
 			Error:  errors.New("location id is missing"),
 		},
-
-		ConfigTestCase{
+		{
+			Name:   "no networks",
 			Config: hookableConfig(func(c *anxtypes.RawConfig) { c.Networks = []anxtypes.RawNetwork{} }),
 			Error:  errors.New("no networks configured"),
 		},
-		ConfigTestCase{
+		{
+			Name:   "vlan deprecated",
 			Config: hookableConfig(func(c *anxtypes.RawConfig) { c.VlanID.Value = "legacy VLAN-ID" }),
 			Error:  anxtypes.ErrConfigVlanIDAndNetworks,
 		},
-		ConfigTestCase{
-			Config: hookableConfig(func(c *anxtypes.RawConfig) { c.DiskSize = 10; c.Disks = []anxtypes.RawDisk{} }),
-			Error:  nil,
+		{
+			Name: "combined",
+			Config: hookableConfig(func(c *anxtypes.RawConfig) {
+				c.Token.Value = ""
+				c.CPUs = 0
+			}),
+			Error: errors.Join(errors.New("token not set"), errors.New("cpu count is missing")),
 		},
-		ConfigTestCase{
+		{
+			Name:   "default is valid",
 			Config: hookableConfig(nil),
 			Error:  nil,
 		},
-	)
+	}
 
 	provider := New(configvar.NewResolver(context.Background(), fake.NewClientBuilder().Build()))
 	for _, testCase := range getSpecsForValidationTest(t, configCases) {
-		err := provider.Validate(context.Background(), zap.NewNop().Sugar(), testCase.Spec)
-		t.Logf("testing config case with expected err: %s", testCase.ExpectedError.Error())
-		if testCase.ExpectedError != nil {
-			if !errors.Is(err, testCase.ExpectedError) {
-				testhelper.AssertEquals(t, testCase.ExpectedError.Error(), err.Error())
+		testCase := testCase
+		t.Run(testCase.Name, func(t *testing.T) {
+			err := provider.Validate(context.Background(), zap.NewNop().Sugar(), testCase.Spec)
+			if testCase.ExpectedError != nil {
+				if !errors.Is(err, testCase.ExpectedError) {
+					testhelper.AssertEquals(t, testCase.ExpectedError.Error(), err.Error())
+				}
+			} else {
+				testhelper.AssertEquals(t, testCase.ExpectedError, err)
 			}
-		} else {
-			testhelper.AssertEquals(t, testCase.ExpectedError, err)
-		}
+		})
 	}
 }
 

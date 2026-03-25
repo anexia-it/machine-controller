@@ -42,16 +42,15 @@ const (
 )
 
 var (
-	// ErrConfigDiskSizeAndDisks is returned when the config has both DiskSize and Disks set, which is unsupported.
-	ErrConfigDiskSizeAndDisks = errors.New("both the deprecated DiskSize and new Disks attribute are set")
-
 	// ErrConfigVlanIDAndNetworks is returned when the config has both VlanID and Networks set, which is unsupported.
 	ErrConfigVlanIDAndNetworks = errors.New("both the deprecated VlanID and new Networks attribute are set")
 )
 
 // RawDisk specifies a single disk, with some values maybe being fetched from secrets.
 type RawDisk struct {
-	Size            int                            `json:"size"`
+	// Size (in Gibibyte) specifies the size of the disk.
+	Size int `json:"size"`
+	// PerformanceType specifies the performance of the disk.
 	PerformanceType providerconfig.ConfigVarString `json:"performanceType"`
 }
 
@@ -73,20 +72,31 @@ type RawNetwork struct {
 
 // RawConfig contains all the configuration values for VMs to create, with some values maybe being fetched from secrets.
 type RawConfig struct {
-	Token      providerconfig.ConfigVarString `json:"token,omitempty"`
+	// Token specifies the Anexia Engine API token.
+	Token providerconfig.ConfigVarString `json:"token,omitempty"`
+	// LocationID specifies the datacenter location.
 	LocationID providerconfig.ConfigVarString `json:"locationID"`
 
-	TemplateID    providerconfig.ConfigVarString `json:"templateID"`
-	Template      providerconfig.ConfigVarString `json:"template"`
+	// TemplateID specifies the template exactly, however most cases should use Template and TemplateBuild instead.
+	TemplateID providerconfig.ConfigVarString `json:"templateID"`
+	// Template specifies the template name.
+	Template providerconfig.ConfigVarString `json:"template"`
+	// TemplateBuild specifies the template build.
 	TemplateBuild providerconfig.ConfigVarString `json:"templateBuild"`
 
-	CPUs               int    `json:"cpus"`
+	// CPUs specify the number of CPUs of the machine
+	CPUs int `json:"cpus"`
+	// CPUPerformanceType specifies the performance of the used CPU.
 	CPUPerformanceType string `json:"cpuPerformanceType"`
-	Memory             int    `json:"memory"`
+	// Memory (in Mebibyte) specifies the main memory size.
+	Memory int `json:"memory"`
 
-	// Deprecated, use Disks instead.
+	// DiskSize (in Gibibytes) for the main disk.
 	DiskSize int `json:"diskSize"`
+	// DiskPerformanceType specifies the performance of the main disk.
+	DiskPerformanceType string `json:"diskPerformanceType"`
 
+	// Disks specifies the additional disks.
 	Disks []RawDisk `json:"disks"`
 
 	// Deprecated, use Networks instead.

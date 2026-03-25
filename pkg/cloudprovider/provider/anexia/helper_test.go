@@ -39,11 +39,13 @@ type ProvisionVMTestCase struct {
 }
 
 type ConfigTestCase struct {
+	Name   string
 	Config anxtypes.RawConfig
 	Error  error
 }
 
 type ValidateCallTestCase struct {
+	Name          string
 	Spec          clusterv1alpha1.MachineSpec
 	ExpectedError error
 }
@@ -66,6 +68,7 @@ func getSpecsForValidationTest(t *testing.T, configCases []ConfigTestCase) []Val
 				},
 			},
 			ExpectedError: configCase.Error,
+			Name:          configCase.Name,
 		})
 	}
 	return testCases
@@ -82,7 +85,12 @@ func hookableConfig(hook func(*anxtypes.RawConfig)) anxtypes.RawConfig {
 	config := anxtypes.RawConfig{
 		CPUs: 1,
 
+		CPUPerformanceType: "performance",
+
 		Memory: 2,
+
+		DiskSize:            5,
+		DiskPerformanceType: "performance",
 
 		Disks: []anxtypes.RawDisk{
 			{Size: 5, PerformanceType: newConfigVarString("ENT6")},

@@ -157,6 +157,11 @@ func provisionVM(ctx context.Context, log *zap.SugaredLogger, client anxclient.C
 			}
 		}
 
+		// TODO disk performance type
+		// TODO cpu performance type
+		// TODO additional disks
+		// TODO ssh key
+
 		// We generate a fresh SSH key but will never actually use it - we just want a valid public key to disable password authentication for our fresh VM.
 		sshKey, err := ssh.NewKey()
 		if err != nil {
@@ -292,49 +297,65 @@ func (p *provider) Validate(ctx context.Context, log *zap.SugaredLogger, machine
 		return fmt.Errorf("failed to parse config: %w", err)
 	}
 
+	errs := make([]error, 0)
 	if config.Token == "" {
-		return errors.New("token not set")
+		errs = append(errs, errors.New("token not set"))
 	}
 
 	if config.CPUs == 0 {
-		return errors.New("cpu count is missing")
+		errs = append(errs, errors.New("cpu count is missing"))
 	}
 
-	if len(config.Disks) == 0 {
-		return errors.New("no disks configured")
+	if config.CPUPerformanceType == "" {
+		errs = append(errs, errors.New("cpu performance type is missing"))
 	}
 
-	for _, disk := range config.Disks {
+	if config.DiskSize == 0 {
+		errs = append(errs, errors.New("disk size is missing"))
+	}
+
+	if config.DiskPerformanceType == "" {
+		errs = append(errs, errors.New("disk performance type is missing"))
+	}
+
+	for i, disk := range config.Disks {
 		if disk.Size == 0 {
-			return errors.New("disk size is missing")
+			errs = append(errs, fmt.Errorf("disk size for disk %d is missing", i))
+		}
+		if disk.PerformanceType == "" {
+			errs = append(errs, fmt.Errorf("disk performance type for disk %d is missing", i))
 		}
 	}
 
 	if config.Memory == 0 {
-		return errors.New("memory size is missing")
+		errs = append(errs, errors.New("memory size is missing"))
 	}
 
 	if config.LocationID == "" {
-		return errors.New("location id is missing")
+		errs = append(errs, errors.New("location id is missing"))
 	}
 
 	if config.TemplateID == "" {
-		return errors.New("no valid template configured")
+		errs = append(errs, errors.New("no valid template configured"))
 	}
 
 	if len(config.Networks) == 0 {
-		return errors.New("no networks configured")
-	}
-
-	atLeastOneAddressSourceConfigured := false
-	for _, network := range config.Networks {
-		if len(network.Prefixes) > 0 {
-			atLeastOneAddressSourceConfigured = true
-			break
+		errs = append(errs, errors.New("no networks configured"))
+	} else {
+		atLeastOneAddressSourceConfigured := false
+		for _, network := range config.Networks {
+			if len(network.Prefixes) > 0 {
+				atLeastOneAddressSourceConfigured = true
+				break
+			}
+		}
+		if !atLeastOneAddressSourceConfigured {
+			errs = append(errs, errors.New("none of the configured networks define an address source, cannot create Machines without any IP"))
 		}
 	}
-	if !atLeastOneAddressSourceConfigured {
-		return errors.New("none of the configured networks define an address source, cannot create Machines without any IP")
+
+	if len(errs) > 0 {
+		return errors.Join(errs...)
 	}
 
 	return nil

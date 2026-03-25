@@ -141,22 +141,7 @@ func (p *provider) resolveBandwidthLimitConfig(config anxtypes.RawNetwork) (int,
 	}
 }
 
-func (p *provider) resolveDiskConfig(log *zap.SugaredLogger, config anxtypes.RawConfig) (*[]resolvedDisk, error) {
-	if config.DiskSize != 0 {
-		if len(config.Disks) != 0 {
-			return nil, anxtypes.ErrConfigDiskSizeAndDisks
-		}
-
-		log.Info("Configuration uses the deprecated DiskSize attribute, please migrate to the Disks array instead.")
-
-		config.Disks = []anxtypes.RawDisk{
-			{
-				Size: config.DiskSize,
-			},
-		}
-		config.DiskSize = 0
-	}
-
+func (p *provider) resolveDiskConfig(_ *zap.SugaredLogger, config anxtypes.RawConfig) (*[]resolvedDisk, error) {
 	ret := make([]resolvedDisk, len(config.Disks))
 
 	for idx, disk := range config.Disks {
