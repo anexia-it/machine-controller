@@ -122,17 +122,17 @@ func provisionVM(ctx context.Context, log *zap.SugaredLogger, client anxclient.C
 			reconcileContext.Machine.Name,
 			config.CPUs,
 			config.Memory,
-			config.Disks[0].Size,
+			config.DiskSize,
 			networkInterfaces,
 		)
 
-		vm.DiskType = config.Disks[0].PerformanceType
+		vm.DiskType = config.DiskPerformanceType
 
 		if config.CPUPerformanceType != "" {
 			vm.CPUPerformanceType = config.CPUPerformanceType
 		}
 
-		for _, disk := range config.Disks[1:] {
+		for _, disk := range config.Disks {
 			vm.AdditionalDisks = append(vm.AdditionalDisks, anxvm.AdditionalDisk{
 				SizeGBs: disk.Size,
 				Type:    disk.PerformanceType,
@@ -157,17 +157,17 @@ func provisionVM(ctx context.Context, log *zap.SugaredLogger, client anxclient.C
 			}
 		}
 
-		// TODO disk performance type
-		// TODO cpu performance type
-		// TODO additional disks
-		// TODO ssh key
-
-		// We generate a fresh SSH key but will never actually use it - we just want a valid public key to disable password authentication for our fresh VM.
-		sshKey, err := ssh.NewKey()
-		if err != nil {
-			return newError(common.CreateMachineError, "failed to generate ssh key: %v", err)
+		if len(config.SSHPublicKeys) > 0 {
+			// use provided SSH public key(s) if specified
+			vm.SSH = strings.Join(config.SSHPublicKeys, "\n")
+		} else {
+			// We generate a fresh SSH key but will never actually use it - we just want a valid public key to disable password authentication for our fresh VM.
+			sshKey, err := ssh.NewKey()
+			if err != nil {
+				return newError(common.CreateMachineError, "failed to generate ssh key: %v", err)
+			}
+			vm.SSH = sshKey.PublicKey
 		}
-		vm.SSH = sshKey.PublicKey
 
 		provisionResponse, err := vmAPI.Provisioning().VM().Provision(ctx, vm, false)
 		meta.SetStatusCondition(&status.Conditions, metav1.Condition{
@@ -233,7 +233,7 @@ func ensureConditions(status *anxtypes.ProviderStatus) {
 // getTokenFromSpec got extracted from getConfig in order to circumvent it.
 //
 // That allowed us to reduce [Cleanup] to the bare minimum and allowing tear
-// downs if the template no longer exists. (ANXKUBE-1361)
+// downs if the template no longer exists (ANXKUBE-1361).
 func (p *provider) getTokenFromSpec(spec clusterv1alpha1.ProviderSpec) (string, error) {
 	if spec.Value == nil {
 		return "", fmt.Errorf("machine.spec.providerSpec.value is nil")
@@ -276,6 +276,8 @@ func (p *provider) getConfig(ctx context.Context, log *zap.SugaredLogger, provSp
 	if err != nil {
 		return nil, nil, fmt.Errorf("error resolving config: %w", err)
 	}
+
+	resolvedConfig.SSHPublicKeys = pconfig.SSHPublicKeys
 
 	return resolvedConfig, pconfig, nil
 }

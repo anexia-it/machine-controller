@@ -49,14 +49,18 @@ type resolvedNetwork struct {
 
 // resolvedConfig contains the resolved values from types.RawConfig.
 type resolvedConfig struct {
-	anxtypes.RawConfig
-
 	Token      string
 	LocationID string
 	TemplateID string
 
-	Disks    []resolvedDisk
-	Networks []resolvedNetwork
+	Disks               []resolvedDisk
+	Networks            []resolvedNetwork
+	SSHPublicKeys       []string
+	CPUs                int
+	CPUPerformanceType  string
+	DiskSize            int
+	DiskPerformanceType string
+	Memory              int
 }
 
 func (p *provider) resolveTemplateID(ctx context.Context, a api.API, config anxtypes.RawConfig, locationID string) (string, error) {
@@ -162,7 +166,11 @@ func (p *provider) resolveDiskConfig(_ *zap.SugaredLogger, config anxtypes.RawCo
 func (p *provider) resolveConfig(ctx context.Context, log *zap.SugaredLogger, config anxtypes.RawConfig) (*resolvedConfig, error) {
 	var err error
 	ret := resolvedConfig{
-		RawConfig: config,
+		CPUs:                config.CPUs,
+		CPUPerformanceType:  config.CPUPerformanceType,
+		DiskSize:            config.DiskSize,
+		DiskPerformanceType: config.DiskPerformanceType,
+		Memory:              config.Memory,
 	}
 
 	ret.Token, err = p.configVarResolver.GetStringValueOrEnv(config.Token, anxtypes.AnxTokenEnv)

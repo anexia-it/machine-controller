@@ -138,10 +138,8 @@ func hookableReconcileContext(locationID string, templateID string, hook func(*r
 					},
 				},
 			},
-			RawConfig: anxtypes.RawConfig{
-				CPUs:   5,
-				Memory: 5,
-			},
+			CPUs:   5,
+			Memory: 5,
 		},
 		ProviderData: &cloudprovidertypes.ProviderData{
 			Update: func(*clusterv1alpha1.Machine, ...cloudprovidertypes.MachineModifier) error {
