@@ -70,14 +70,14 @@ func (p *provider) Create(ctx context.Context, log *zap.SugaredLogger, machine *
 		return nil, fmt.Errorf("failed to get provider config: %w", err)
 	}
 
-	ctx = createReconcileContext(ctx, reconcileContext{
+	reconcileCtx := reconcileContext{
 		Status:         &status,
 		UserData:       userdata,
 		Config:         *config,
 		ProviderData:   data,
 		ProviderConfig: providerCfg,
 		Machine:        machine,
-	})
+	}
 
 	_, client, err := getClient(config.Token, &machine.Name)
 	if err != nil {
@@ -91,15 +91,14 @@ func (p *provider) Create(ctx context.Context, log *zap.SugaredLogger, machine *
 	}()
 
 	// provision machine
-	err = provisionVM(ctx, log, client)
+	err = provisionVM(ctx, reconcileCtx, log, client)
 	if err != nil {
 		return nil, anexiaErrorToTerminalError(err, "failed waiting for vm provisioning")
 	}
 	return p.Get(ctx, log, machine, data)
 }
 
-func provisionVM(ctx context.Context, log *zap.SugaredLogger, client anxclient.Client) error {
-	reconcileContext := getReconcileContext(ctx)
+func provisionVM(ctx context.Context, reconcileContext reconcileContext, log *zap.SugaredLogger, client anxclient.Client) error {
 	vmAPI := vsphere.NewAPI(client)
 
 	ctx, cancel := context.WithTimeout(ctx, anxtypes.CreateRequestTimeout)
@@ -110,7 +109,7 @@ func provisionVM(ctx context.Context, log *zap.SugaredLogger, client anxclient.C
 		log.Info("Machine does not contain a provisioningID yet. Starting to provision")
 
 		config := reconcileContext.Config
-		networkInterfaces, err := networkInterfacesForProvisioning(ctx, log, client)
+		networkInterfaces, err := networkInterfacesForProvisioning(ctx, reconcileContext, log, client)
 		if err != nil {
 			return fmt.Errorf("error generating network config for machine: %w", err)
 		}
@@ -170,15 +169,22 @@ func provisionVM(ctx context.Context, log *zap.SugaredLogger, client anxclient.C
 		}
 
 		provisionResponse, err := vmAPI.Provisioning().VM().Provision(ctx, vm, false)
+		if err != nil {
+			meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+				Type:    ProvisionedType,
+				Status:  metav1.ConditionFalse,
+				Reason:  "ProvisioningError",
+				Message: fmt.Sprintf("instance provisioning failed: %v", err.Error()),
+			})
+			return newError(common.CreateMachineError, "instance provisioning failed: %v", err)
+		}
+
 		meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 			Type:    ProvisionedType,
 			Status:  metav1.ConditionFalse,
 			Reason:  "Provisioning",
 			Message: "provisioning request was sent",
 		})
-		if err != nil {
-			return newError(common.CreateMachineError, "instance provisioning failed: %v", err)
-		}
 
 		// we successfully sent a VM provisioning request to the API, we consider the IP as 'Bound' now
 		networkStatusMarkIPsBound(status)
@@ -200,23 +206,6 @@ func provisionVM(ctx context.Context, log *zap.SugaredLogger, client anxclient.C
 	})
 
 	return updateMachineStatus(reconcileContext.Machine, *status, reconcileContext.ProviderData.Update)
-}
-
-func isAlreadyProvisioning(ctx context.Context) bool {
-	status := getReconcileContext(ctx).Status
-	condition := meta.FindStatusCondition(status.Conditions, ProvisionedType)
-	lastChange := condition.LastTransitionTime.Time
-	const reasonInProvisioning = "InProvisioning"
-	if condition.Reason == reasonInProvisioning && time.Since(lastChange) > 5*time.Minute {
-		meta.SetStatusCondition(&status.Conditions, metav1.Condition{
-			Type:    ProvisionedType,
-			Reason:  "ReInitialising",
-			Message: "Could not find ongoing VM provisioning",
-			Status:  metav1.ConditionFalse,
-		})
-	}
-
-	return condition.Status == metav1.ConditionFalse && condition.Reason == reasonInProvisioning
 }
 
 func ensureConditions(status *anxtypes.ProviderStatus) {

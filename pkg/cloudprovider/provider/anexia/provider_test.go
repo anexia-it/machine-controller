@@ -205,9 +205,7 @@ func TestAnexiaProvider(t *testing.T) {
 				testhelper.AssertNoErr(t, err)
 			})
 
-			ctx := createReconcileContext(context.Background(), testCase.ReconcileContext)
-
-			err := provisionVM(ctx, log, client)
+			err := provisionVM(context.Background(), testCase.ReconcileContext, log, client)
 			testhelper.AssertNoErr(t, err)
 		}
 	})
@@ -364,25 +362,25 @@ func TestAnexiaProvider(t *testing.T) {
 				},
 			},
 		}
-		ctx := createReconcileContext(context.Background(), reconcileContext{
+		reconcileCtx := reconcileContext{
 			Status:       &providerStatus,
 			UserData:     "",
 			Config:       resolvedConfig{},
 			ProviderData: nil,
-		})
+		}
 
 		condition := meta.FindStatusCondition(providerStatus.Conditions, ProvisionedType)
 		condition.LastTransitionTime = metav1.Time{Time: time.Now().Add(-1 * time.Minute)}
-		testhelper.AssertEquals(t, true, isAlreadyProvisioning(ctx))
+		testhelper.AssertEquals(t, true, isAlreadyProvisioning(reconcileCtx))
 
 		condition.Reason = "Provisioned"
 		condition.Status = metav1.ConditionTrue
-		testhelper.AssertEquals(t, false, isAlreadyProvisioning(ctx))
+		testhelper.AssertEquals(t, false, isAlreadyProvisioning(reconcileCtx))
 
 		condition.Reason = "InProvisioning"
 		condition.Status = metav1.ConditionFalse
 		condition.LastTransitionTime = metav1.Time{Time: time.Now().Add(-10 * time.Minute)}
-		testhelper.AssertEquals(t, false, isAlreadyProvisioning(ctx))
+		testhelper.AssertEquals(t, false, isAlreadyProvisioning(reconcileCtx))
 		testhelper.AssertEquals(t, condition.Reason, "ReInitialising")
 	})
 
@@ -400,18 +398,35 @@ func TestAnexiaProvider(t *testing.T) {
 				},
 			},
 		}
-		ctx := createReconcileContext(context.Background(), reconcileContext{Status: providerStatus})
+		reconcileCtx := reconcileContext{Status: providerStatus}
 
 		t.Run("with unbound reserved IP", func(t *testing.T) {
 			expectedIP := "8.8.8.8"
 			providerStatus.Networks[0].Addresses[0].ReservedIP = expectedIP
 			providerStatus.Networks[0].Addresses[0].IPState = anxtypes.IPStateUnbound
 			providerStatus.Networks[0].Addresses[0].IPProvisioningExpires = time.Now().Add(anxtypes.IPProvisioningExpires)
-			reservedIP, err := getIPAddress(ctx, log, &resolvedNetwork{}, "Prefix-ID", &providerStatus.Networks[0].Addresses[0], client)
+			reservedIP, err := getIPAddress(context.Background(), reconcileCtx, log, &resolvedNetwork{}, "Prefix-ID", &providerStatus.Networks[0].Addresses[0], client)
 			testhelper.AssertNoErr(t, err)
 			testhelper.AssertEquals(t, expectedIP, reservedIP)
 		})
 	})
+}
+
+func isAlreadyProvisioning(reconcileContext reconcileContext) bool {
+	status := reconcileContext.Status
+	condition := meta.FindStatusCondition(status.Conditions, ProvisionedType)
+	lastChange := condition.LastTransitionTime.Time
+	const reasonInProvisioning = "InProvisioning"
+	if condition.Reason == reasonInProvisioning && time.Since(lastChange) > 5*time.Minute {
+		meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+			Type:    ProvisionedType,
+			Reason:  "ReInitialising",
+			Message: "Could not find ongoing VM provisioning",
+			Status:  metav1.ConditionFalse,
+		})
+	}
+
+	return condition.Status == metav1.ConditionFalse && condition.Reason == reasonInProvisioning
 }
 
 func TestValidate(t *testing.T) {
