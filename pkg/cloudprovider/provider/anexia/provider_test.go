@@ -216,10 +216,9 @@ func TestAnexiaProvider(t *testing.T) {
 		t.Parallel()
 
 		type testCase struct {
-			config                        anxtypes.RawConfig
-			expectedError                 string
-			expectedNetworkBandwidthLimit int
-			expectedNetwork               []resolvedNetwork
+			config          anxtypes.RawConfig
+			expectedError   string
+			expectedNetwork []resolvedNetwork
 		}
 
 		testCases := []testCase{
