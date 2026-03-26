@@ -20,27 +20,29 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"net"
+	"log"
 	"net/http"
 	"net/http/pprof"
 	"strings"
 	"time"
 
+	"github.com/go-logr/zapr"
 	"github.com/prometheus/client_golang/prometheus"
+	"go.uber.org/zap"
 
-	clusterv1alpha1 "github.com/kubermatic/machine-controller/pkg/apis/cluster/v1alpha1"
-	"github.com/kubermatic/machine-controller/pkg/apis/cluster/v1alpha1/migrations"
-	cloudprovidertypes "github.com/kubermatic/machine-controller/pkg/cloudprovider/types"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/util"
-	clusterinfo "github.com/kubermatic/machine-controller/pkg/clusterinfo"
-	"github.com/kubermatic/machine-controller/pkg/containerruntime"
-	machinecontroller "github.com/kubermatic/machine-controller/pkg/controller/machine"
-	machinedeploymentcontroller "github.com/kubermatic/machine-controller/pkg/controller/machinedeployment"
-	machinesetcontroller "github.com/kubermatic/machine-controller/pkg/controller/machineset"
-	"github.com/kubermatic/machine-controller/pkg/controller/nodecsrapprover"
-	"github.com/kubermatic/machine-controller/pkg/health"
-	machinesv1alpha1 "github.com/kubermatic/machine-controller/pkg/machines/v1alpha1"
-	"github.com/kubermatic/machine-controller/pkg/node"
+	cloudprovidertypes "k8c.io/machine-controller/pkg/cloudprovider/types"
+	"k8c.io/machine-controller/pkg/cloudprovider/util"
+	clusterinfo "k8c.io/machine-controller/pkg/clusterinfo"
+	machinecontroller "k8c.io/machine-controller/pkg/controller/machine"
+	machinedeploymentcontroller "k8c.io/machine-controller/pkg/controller/machinedeployment"
+	machinesetcontroller "k8c.io/machine-controller/pkg/controller/machineset"
+	"k8c.io/machine-controller/pkg/controller/nodecsrapprover"
+	"k8c.io/machine-controller/pkg/health"
+	machinecontrollerlog "k8c.io/machine-controller/pkg/log"
+	"k8c.io/machine-controller/pkg/migrations"
+	"k8c.io/machine-controller/pkg/node"
+	clusterv1alpha1 "k8c.io/machine-controller/sdk/apis/cluster/v1alpha1"
+	machinesv1alpha1 "k8c.io/machine-controller/sdk/apis/machines/v1alpha1"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -48,11 +50,13 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/klog"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	ctrlruntimelog "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/manager/signals"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
 var (
@@ -71,23 +75,32 @@ var (
 	enableLeaderElection             bool
 	leaderElectionNamespace          string
 
-	useOSM               bool
-	useExternalBootstrap bool
-
-	nodeCSRApprover                   bool
-	nodeHTTPProxy                     string
-	nodeNoProxy                       string
-	nodeInsecureRegistries            string
-	nodeRegistryMirrors               string
-	nodePauseImage                    string
-	nodeContainerRuntime              string
-	podCIDR                           string
-	nodePortRange                     string
-	nodeRegistryCredentialsSecret     string
-	nodeContainerdVersion             string
-	nodeContainerdRegistryMirrors     = containerruntime.RegistryMirrorsFlags{}
+	useExternalBootstrap              bool
 	overrideBootstrapKubeletAPIServer string
+	nodeCSRApprover                   bool
+	nodePortRange                     string
+
+	nodeHTTPProxy                 string
+	nodeNoProxy                   string
+	nodeInsecureRegistries        string
+	nodeRegistryMirrors           string
+	nodePauseImage                string
+	nodeContainerRuntime          string
+	nodeRegistryCredentialsSecret string
+	nodeContainerdVersion         string
+	nodeContainerdRegistryMirrors sliceVar
 )
+
+type sliceVar []string
+
+func (s *sliceVar) String() string {
+	return strings.Join(*s, ",")
+}
+
+func (s *sliceVar) Set(value string) error {
+	*s = append(*s, value)
+	return nil
+}
 
 const (
 	defaultLeaderElectionNamespace = "kube-system"
@@ -130,19 +143,19 @@ type controllerRunOptions struct {
 
 	node machinecontroller.NodeSettings
 
-	// Enable external bootstrap management by consuming secrets that are used to configure an instance's user-data.
-	useExternalBootstrap bool
-
 	// A port range to reserve for services with NodePort visibility.
 	nodePortRange string
 
 	overrideBootstrapKubeletAPIServer string
+
+	log *zap.SugaredLogger
 }
 
 func main() {
 	nodeFlags := node.NewFlags(flag.CommandLine)
+	logFlags := machinecontrollerlog.NewDefaultOptions()
+	logFlags.AddFlags(flag.CommandLine)
 
-	klog.InitFlags(nil)
 	// This is also being registered in kubevirt.io/kubevirt/pkg/kubecli/kubecli.go so
 	// we have to guard it.
 	// TODO: Evaluate alternatives to importing the CLI. Generate our own client? Use a dynamic client?
@@ -152,7 +165,7 @@ func main() {
 	if flag.Lookup("master") == nil {
 		flag.StringVar(&masterURL, "master", "", "The address of the Kubernetes API server. Overrides any value in kubeconfig. Only required if out-of-cluster.")
 	}
-	flag.StringVar(&clusterDNSIPs, "cluster-dns", "10.10.10.10", "Comma-separated list of DNS server IP address.")
+	flag.StringVar(&clusterDNSIPs, "cluster-dns", "", "DEPRECATED: This flag is no-op and will have no effect. This value should be configured in the user-data provider, such as operating-system-manager.")
 	flag.IntVar(&workerCount, "worker-count", 1, "Number of workers to process machines. Using a high number with a lot of machines might cause getting rate-limited from your cloud provider.")
 	flag.StringVar(&healthProbeAddress, "health-probe-address", "127.0.0.1:8085", "The address on which the liveness check on /healthz and readiness check on /readyz will be available")
 	flag.StringVar(&metricsAddress, "metrics-address", "127.0.0.1:8080", "The address on which Prometheus metrics will be available under /metrics")
@@ -164,61 +177,65 @@ func main() {
 	flag.StringVar(&bootstrapTokenServiceAccountName, "bootstrap-token-service-account-name", "", "When set use the service account token from this SA as bootstrap token instead of creating a temporary one. Passed in namespace/name format")
 	flag.BoolVar(&profiling, "enable-profiling", false, "when set, enables the endpoints on the http server under /debug/pprof/")
 	flag.DurationVar(&skipEvictionAfter, "skip-eviction-after", 2*time.Hour, "Skips the eviction if a machine is not gone after the specified duration.")
-	flag.StringVar(&nodeHTTPProxy, "node-http-proxy", "", "If set, it configures the 'HTTP_PROXY' & 'HTTPS_PROXY' environment variable on the nodes.")
-	flag.StringVar(&nodeNoProxy, "node-no-proxy", ".svc,.cluster.local,localhost,127.0.0.1", "If set, it configures the 'NO_PROXY' environment variable on the nodes.")
-	flag.StringVar(&nodeInsecureRegistries, "node-insecure-registries", "", "Comma separated list of registries which should be configured as insecure on the container runtime")
-	flag.StringVar(&nodeRegistryMirrors, "node-registry-mirrors", "", "Comma separated list of Docker image mirrors")
-	flag.StringVar(&nodePauseImage, "node-pause-image", "", "Image for the pause container including tag. If not set, the kubelet default will be used: https://kubernetes.io/docs/reference/command-line-tools-reference/kubelet/")
-	flag.String("node-kubelet-repository", "quay.io/kubermatic/kubelet", "[NO-OP] Repository for the kubelet container. Has no effects.")
-	flag.StringVar(&nodeContainerRuntime, "node-container-runtime", "docker", "container-runtime to deploy")
-	flag.StringVar(&nodeContainerdVersion, "node-containerd-version", "", "version of containerd to deploy")
-	flag.Var(&nodeContainerdRegistryMirrors, "node-containerd-registry-mirrors", "Configure registry mirrors endpoints. Can be used multiple times to specify multiple mirrors")
+	flag.BoolVar(&useExternalBootstrap, "use-external-bootstrap", true, "DEPRECATED: This flag is no-op and will have no effect since machine-controller only supports external bootstrap mechanism. This flag is only kept for backwards compatibility and will be removed in the future")
+	flag.StringVar(&overrideBootstrapKubeletAPIServer, "override-bootstrap-kubelet-apiserver", "", "Override for the API server address used in worker nodes bootstrap-kubelet.conf")
 	flag.StringVar(&caBundleFile, "ca-bundle", "", "path to a file containing all PEM-encoded CA certificates (will be used instead of the host's certificates if set)")
 	flag.BoolVar(&nodeCSRApprover, "node-csr-approver", true, "Enable NodeCSRApprover controller to automatically approve node serving certificate requests")
-	flag.StringVar(&podCIDR, "pod-cidr", "172.25.0.0/16", "WARNING: flag is unused, kept only for backwards compatibility")
 	flag.StringVar(&nodePortRange, "node-port-range", "30000-32767", "A port range to reserve for services with NodePort visibility")
-	flag.StringVar(&nodeRegistryCredentialsSecret, "node-registry-credentials-secret", "", "A Secret object reference, that contains auth info for image registry in namespace/secret-name form, example: kube-system/registry-credentials. See doc at https://github.com/kubermaric/machine-controller/blob/main/docs/registry-authentication.md")
-	flag.BoolVar(&useOSM, "use-osm", false, "DEPRECATED: use osm controller for node bootstrap [use use-external-bootstrap instead]")
-	flag.BoolVar(&useExternalBootstrap, "use-external-bootstrap", false, "use an external bootstrap provider for instance user-data (e.g. operating-system-manager, also known as OSM)")
-	flag.StringVar(&overrideBootstrapKubeletAPIServer, "override-bootstrap-kubelet-apiserver", "", "Override for the API server address used in worker nodes bootstrap-kubelet.conf")
+
+	flag.StringVar(&nodeHTTPProxy, "node-http-proxy", "", "DEPRECATED: This flag is no-op and will have no effect. This value should be configured in the user-data provider, such as operating-system-manager.")
+	flag.StringVar(&nodeNoProxy, "node-no-proxy", "", "DEPRECATED: This flag is no-op and will have no effect. This value should be configured in the user-data provider, such as operating-system-manager.")
+	flag.StringVar(&nodeInsecureRegistries, "node-insecure-registries", "", "DEPRECATED: This flag is no-op and will have no effect. This value should be configured in the user-data provider, such as operating-system-manager.")
+	flag.StringVar(&nodeRegistryMirrors, "node-registry-mirrors", "", "DEPRECATED: This flag is no-op and will have no effect. This value should be configured in the user-data provider, such as operating-system-manager.")
+	flag.StringVar(&nodePauseImage, "node-pause-image", "", "DEPRECATED: This flag is no-op and will have no effect. This value should be configured in the user-data provider, such as operating-system-manager.")
+	flag.StringVar(&nodeContainerRuntime, "node-container-runtime", "", "DEPRECATED: This flag is no-op and will have no effect. This value should be configured in the user-data provider, such as operating-system-manager.")
+	flag.StringVar(&nodeContainerdVersion, "node-containerd-version", "", "DEPRECATED: This flag is no-op and will have no effect. This value should be configured in the user-data provider, such as operating-system-manager.")
+	flag.Var(&nodeContainerdRegistryMirrors, "node-containerd-registry-mirrors", "DEPRECATED: This flag is no-op and will have no effect. This value should be configured in the user-data provider, such as operating-system-manager.")
+	flag.StringVar(&nodeRegistryCredentialsSecret, "node-registry-credentials-secret", "", "DEPRECATED: This flag is no-op and will have no effect. This value should be configured in the user-data provider, such as operating-system-manager.")
 
 	flag.Parse()
+
+	if err := logFlags.Validate(); err != nil {
+		log.Fatalf("Invalid options: %v", err)
+	}
+
+	rawLog := machinecontrollerlog.New(logFlags.Debug, logFlags.Format)
+	log := rawLog.Sugar()
+
+	// set the logger used by controller-runtime
+	ctrlruntimelog.SetLogger(zapr.NewLogger(rawLog.WithOptions(zap.AddCallerSkip(1))))
+
 	kubeconfig = flag.Lookup("kubeconfig").Value.(flag.Getter).Get().(string)
 	masterURL = flag.Lookup("master").Value.(flag.Getter).Get().(string)
-
-	clusterDNSIPs, err := parseClusterDNSIPs(clusterDNSIPs)
-	if err != nil {
-		klog.Fatalf("invalid cluster dns specified: %v", err)
-	}
 
 	var parsedJoinClusterTimeout *time.Duration
 	if joinClusterTimeout != "" {
 		parsedJoinClusterTimeoutLiteral, err := time.ParseDuration(joinClusterTimeout)
 		parsedJoinClusterTimeout = &parsedJoinClusterTimeoutLiteral
 		if err != nil {
-			klog.Fatalf("failed to parse join-cluster-timeout as duration: %v", err)
+			log.Fatalw("Failed to parse join-cluster-timeout as duration", zap.Error(err))
 		}
 	}
 
 	// Needed for migrations
 	if err := machinesv1alpha1.AddToScheme(scheme.Scheme); err != nil {
-		klog.Fatalf("failed to add machinesv1alpha1 api to scheme: %v", err)
+		log.Fatalw("Failed to add api to scheme", "api", machinesv1alpha1.SchemeGroupVersion, zap.Error(err))
 	}
 	if err := apiextensionsv1.AddToScheme(scheme.Scheme); err != nil {
-		klog.Fatalf("failed to add apiextensionsv1 api to scheme: %v", err)
+		log.Fatalw("Failed to add api to scheme", "api", apiextensionsv1.SchemeGroupVersion, zap.Error(err))
 	}
 	if err := clusterv1alpha1.AddToScheme(scheme.Scheme); err != nil {
-		klog.Fatalf("failed to add clusterv1alpha1 api to scheme: %v", err)
+		log.Fatalw("Failed to add api to scheme", "api", clusterv1alpha1.SchemeGroupVersion, zap.Error(err))
 	}
 
 	cfg, err := clientcmd.BuildConfigFromFlags(masterURL, kubeconfig)
 	if err != nil {
-		klog.Fatalf("error building kubeconfig: %v", err)
+		log.Fatalw("Failed to build kubeconfig", zap.Error(err))
 	}
 
 	if caBundleFile != "" {
 		if err := util.SetCABundleFile(caBundleFile); err != nil {
-			klog.Fatalf("-ca-bundle is invalid: %v", err)
+			log.Fatalw("-ca-bundle is invalid", zap.Error(err))
 		}
 	}
 
@@ -228,56 +245,34 @@ func main() {
 	// QPS and Burst config there
 	machineCfg, err := clientcmd.BuildConfigFromFlags(masterURL, kubeconfig)
 	if err != nil {
-		klog.Fatalf("error building kubeconfig for machines: %v", err)
+		log.Fatalw("Failed to build kubeconfig for machines", zap.Error(err))
 	}
 
 	kubeClient, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
-		klog.Fatalf("error building kubernetes clientset for kubeClient: %v", err)
+		log.Fatalw("Failed to build kubernetes clientset for kubeClient", zap.Error(err))
 	}
 	kubeconfigProvider := clusterinfo.New(cfg, kubeClient)
 
 	ctrlMetrics := machinecontroller.NewMachineControllerMetrics()
 	ctrlMetrics.MustRegister(metrics.Registry)
 
-	containerRuntimeOpts := containerruntime.Opts{
-		ContainerRuntime:          nodeContainerRuntime,
-		ContainerdVersion:         nodeContainerdVersion,
-		ContainerdRegistryMirrors: nodeContainerdRegistryMirrors,
-		InsecureRegistries:        nodeInsecureRegistries,
-		PauseImage:                nodePauseImage,
-		RegistryMirrors:           nodeRegistryMirrors,
-		RegistryCredentialsSecret: nodeRegistryCredentialsSecret,
-	}
-	containerRuntimeConfig, err := containerruntime.BuildConfig(containerRuntimeOpts)
-	if err != nil {
-		klog.Fatalf("failed to generate container runtime config: %v", err)
-	}
-
 	runOptions := controllerRunOptions{
-		kubeClient:           kubeClient,
-		kubeconfigProvider:   kubeconfigProvider,
-		name:                 name,
-		cfg:                  machineCfg,
-		metrics:              ctrlMetrics,
-		prometheusRegisterer: metrics.Registry,
-		skipEvictionAfter:    skipEvictionAfter,
-		nodeCSRApprover:      nodeCSRApprover,
-		node: machinecontroller.NodeSettings{
-			ClusterDNSIPs:                clusterDNSIPs,
-			HTTPProxy:                    nodeHTTPProxy,
-			NoProxy:                      nodeNoProxy,
-			PauseImage:                   nodePauseImage,
-			RegistryCredentialsSecretRef: nodeRegistryCredentialsSecret,
-			ContainerRuntime:             containerRuntimeConfig,
-		},
-		useExternalBootstrap:              useExternalBootstrap || useOSM,
+		log:                               log,
+		kubeClient:                        kubeClient,
+		kubeconfigProvider:                kubeconfigProvider,
+		name:                              name,
+		cfg:                               machineCfg,
+		metrics:                           ctrlMetrics,
+		prometheusRegisterer:              metrics.Registry,
+		skipEvictionAfter:                 skipEvictionAfter,
+		nodeCSRApprover:                   nodeCSRApprover,
 		nodePortRange:                     nodePortRange,
 		overrideBootstrapKubeletAPIServer: overrideBootstrapKubeletAPIServer,
 	}
 
 	if err := nodeFlags.UpdateNodeSettings(&runOptions.node); err != nil {
-		klog.Fatalf("failed to update nodesettings: %v", err)
+		log.Fatalw("Failed to update nodesettings", zap.Error(err))
 	}
 
 	if parsedJoinClusterTimeout != nil {
@@ -287,7 +282,7 @@ func main() {
 	if bootstrapTokenServiceAccountName != "" {
 		flagParts := strings.Split(bootstrapTokenServiceAccountName, "/")
 		if flagPartsLen := len(flagParts); flagPartsLen != 2 {
-			klog.Fatalf("Splitting the bootstrap-token-service-account-name flag value in '/' returned %d parts, expected exactly two", flagPartsLen)
+			log.Fatalf("Splitting the bootstrap-token-service-account-name flag value in '/' returned %d parts, expected exactly two", flagPartsLen)
 		}
 		runOptions.bootstrapTokenServiceAccountName = &types.NamespacedName{Namespace: flagParts[0], Name: flagParts[1]}
 	}
@@ -295,16 +290,16 @@ func main() {
 	ctx := signals.SetupSignalHandler()
 	go func() {
 		<-ctx.Done()
-		klog.Info("caught signal, shutting down...")
+		log.Info("Caught signal, shutting down...")
 	}()
 
 	mgr, err := createManager(5*time.Minute, runOptions)
 	if err != nil {
-		klog.Fatalf("failed to create runtime manager: %v", err)
+		log.Fatalw("Failed to create runtime manager", zap.Error(err))
 	}
 
 	if err := mgr.Start(ctx); err != nil {
-		klog.Errorf("failed to start kubebuilder manager: %v", err)
+		log.Errorw("Failed to start manager", zap.Error(err))
 	}
 }
 
@@ -314,30 +309,7 @@ func createManager(syncPeriod time.Duration, options controllerRunOptions) (mana
 		namespace = defaultLeaderElectionNamespace
 	}
 
-	mgr, err := manager.New(options.cfg, manager.Options{
-		SyncPeriod:              &syncPeriod,
-		LeaderElection:          enableLeaderElection,
-		LeaderElectionID:        defaultLeaderElectionID,
-		LeaderElectionNamespace: namespace,
-		HealthProbeBindAddress:  healthProbeAddress,
-		MetricsBindAddress:      metricsAddress,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("error building ctrlruntime manager: %w", err)
-	}
-
-	if err := mgr.AddReadyzCheck("alive", healthz.Ping); err != nil {
-		return nil, fmt.Errorf("failed to add readiness check: %w", err)
-	}
-
-	if err := mgr.AddHealthzCheck("kubeconfig", health.KubeconfigAvailable(options.kubeconfigProvider)); err != nil {
-		return nil, fmt.Errorf("failed to add health check: %w", err)
-	}
-
-	if err := mgr.AddHealthzCheck("apiserver-connection", health.ApiserverReachable(options.kubeClient)); err != nil {
-		return nil, fmt.Errorf("failed to add health check: %w", err)
-	}
-
+	metricsOptions := metricsserver.Options{BindAddress: metricsAddress}
 	if profiling {
 		m := http.NewServeMux()
 		m.HandleFunc("/", pprof.Index)
@@ -345,12 +317,37 @@ func createManager(syncPeriod time.Duration, options controllerRunOptions) (mana
 		m.HandleFunc("/profile", pprof.Profile)
 		m.HandleFunc("/symbol", pprof.Symbol)
 		m.HandleFunc("/trace", pprof.Trace)
-
-		if err := mgr.AddMetricsExtraHandler("/debug/pprof/", m); err != nil {
-			return nil, fmt.Errorf("failed to add pprof http handlers: %w", err)
+		metricsOptions.ExtraHandlers = map[string]http.Handler{
+			"/debug/pprof/": m,
 		}
 	}
 
+	mgr, err := manager.New(options.cfg, manager.Options{
+		Cache: cache.Options{
+			DefaultNamespaces: map[string]cache.Config{},
+			SyncPeriod:        &syncPeriod,
+		},
+		LeaderElection:          enableLeaderElection,
+		LeaderElectionID:        defaultLeaderElectionID,
+		LeaderElectionNamespace: namespace,
+		HealthProbeBindAddress:  healthProbeAddress,
+		Metrics:                 metricsOptions,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to build ctrlruntime manager: %w", err)
+	}
+
+	if err := mgr.AddReadyzCheck("alive", healthz.Ping); err != nil {
+		return nil, fmt.Errorf("failed to add readiness check: %w", err)
+	}
+
+	if err := mgr.AddHealthzCheck("kubeconfig", health.KubeconfigAvailable(options.kubeconfigProvider, options.log)); err != nil {
+		return nil, fmt.Errorf("failed to add health check: %w", err)
+	}
+
+	if err := mgr.AddHealthzCheck("apiserver-connection", health.ApiserverReachable(options.kubeClient)); err != nil {
+		return nil, fmt.Errorf("failed to add health check: %w", err)
+	}
 	if err := mgr.Add(&controllerBootstrap{
 		mgr: mgr,
 		opt: options,
@@ -384,20 +381,24 @@ func (bs *controllerBootstrap) Start(ctx context.Context) error {
 	}
 
 	// Migrate MachinesV1Alpha1Machine to ClusterV1Alpha1Machine.
-	if err := migrations.MigrateMachinesv1Alpha1MachineToClusterv1Alpha1MachineIfNecessary(ctx, client, bs.opt.kubeClient, providerData); err != nil {
+	if err := migrations.MigrateMachinesv1Alpha1MachineToClusterv1Alpha1MachineIfNecessary(ctx, bs.opt.log, client, providerData); err != nil {
 		return fmt.Errorf("migration to clusterv1alpha1 failed: %w", err)
 	}
 
 	// Migrate providerConfig field to providerSpec field.
-	if err := migrations.MigrateProviderConfigToProviderSpecIfNecessary(ctx, bs.opt.cfg, client); err != nil {
+	if err := migrations.MigrateProviderConfigToProviderSpecIfNecessary(ctx, bs.opt.log, bs.opt.cfg, client); err != nil {
 		return fmt.Errorf("migration of providerConfig field to providerSpec field failed: %w", err)
 	}
 
 	machineCollector := machinecontroller.NewMachineCollector(ctx, bs.mgr.GetClient())
 	metrics.Registry.MustRegister(machineCollector)
 
+	machineDeploymentCollector := machinedeploymentcontroller.NewCollector(ctx, bs.mgr.GetClient())
+	metrics.Registry.MustRegister(machineDeploymentCollector)
+
 	if err := machinecontroller.Add(
 		ctx,
+		bs.opt.log,
 		bs.mgr,
 		bs.opt.kubeClient,
 		workerCount,
@@ -409,41 +410,27 @@ func (bs *controllerBootstrap) Start(ctx context.Context) error {
 		bs.opt.bootstrapTokenServiceAccountName,
 		bs.opt.skipEvictionAfter,
 		bs.opt.node,
-		bs.opt.useExternalBootstrap,
 		bs.opt.nodePortRange,
 		bs.opt.overrideBootstrapKubeletAPIServer,
 	); err != nil {
 		return fmt.Errorf("failed to add Machine controller to manager: %w", err)
 	}
 
-	if err := machinesetcontroller.Add(bs.mgr); err != nil {
+	if err := machinesetcontroller.Add(bs.mgr, bs.opt.log); err != nil {
 		return fmt.Errorf("failed to add MachineSet controller to manager: %w", err)
 	}
 
-	if err := machinedeploymentcontroller.Add(bs.mgr); err != nil {
+	if err := machinedeploymentcontroller.Add(bs.mgr, bs.opt.log); err != nil {
 		return fmt.Errorf("failed to add MachineDeployment controller to manager: %w", err)
 	}
 
 	if bs.opt.nodeCSRApprover {
-		if err := nodecsrapprover.Add(bs.mgr); err != nil {
+		if err := nodecsrapprover.Add(bs.mgr, bs.opt.log); err != nil {
 			return fmt.Errorf("failed to add NodeCSRApprover controller to manager: %w", err)
 		}
 	}
 
-	klog.Info("machine controller startup complete")
+	bs.opt.log.Info("Machine-controller startup complete")
 
 	return nil
-}
-
-func parseClusterDNSIPs(s string) ([]net.IP, error) {
-	var ips []net.IP
-	sips := strings.Split(s, ",")
-	for _, sip := range sips {
-		ip := net.ParseIP(strings.TrimSpace(sip))
-		if ip == nil {
-			return nil, fmt.Errorf("unable to parse ip %s", sip)
-		}
-		ips = append(ips, ip)
-	}
-	return ips, nil
 }

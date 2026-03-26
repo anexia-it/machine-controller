@@ -36,24 +36,22 @@ import (
 	"github.com/aws/smithy-go"
 	gocache "github.com/patrickmn/go-cache"
 	"github.com/prometheus/client_golang/prometheus"
+	"go.uber.org/zap"
 
-	"github.com/kubermatic/machine-controller/pkg/apis/cluster/common"
-	clusterv1alpha1 "github.com/kubermatic/machine-controller/pkg/apis/cluster/v1alpha1"
-	cloudprovidererrors "github.com/kubermatic/machine-controller/pkg/cloudprovider/errors"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/instance"
-	awstypes "github.com/kubermatic/machine-controller/pkg/cloudprovider/provider/aws/types"
-	cloudprovidertypes "github.com/kubermatic/machine-controller/pkg/cloudprovider/types"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/util"
-	"github.com/kubermatic/machine-controller/pkg/providerconfig"
-	providerconfigtypes "github.com/kubermatic/machine-controller/pkg/providerconfig/types"
-	"github.com/kubermatic/machine-controller/pkg/userdata/convert"
+	cloudprovidererrors "k8c.io/machine-controller/pkg/cloudprovider/errors"
+	"k8c.io/machine-controller/pkg/cloudprovider/instance"
+	cloudprovidertypes "k8c.io/machine-controller/pkg/cloudprovider/types"
+	"k8c.io/machine-controller/sdk/apis/cluster/common"
+	clusterv1alpha1 "k8c.io/machine-controller/sdk/apis/cluster/v1alpha1"
+	awstypes "k8c.io/machine-controller/sdk/cloudprovider/aws"
+	"k8c.io/machine-controller/sdk/net"
+	"k8c.io/machine-controller/sdk/providerconfig"
 
-	v1 "k8s.io/api/core/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/klog"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
@@ -61,6 +59,11 @@ const (
 	// Interval and timeout for polling.
 	pollInterval = 2 * time.Second
 	pollTimeout  = 5 * time.Minute
+	// The maximum number of hops that the metadata service can be forwarded to, defaults to 2.
+	// We need to set this to a higher value i.e. 3 to ensure that it is not blocked by extra hops that are introduced either by CNI or other networking components. With lower
+	// limits AWS metadata service is not reachable from the container network in such a scenario.
+	// For example: https://github.com/cilium/cilium/issues/25232
+	awsMetadataHTTPPutResponseHopLimit = 3
 )
 
 var (
@@ -74,11 +77,11 @@ func init() {
 }
 
 type provider struct {
-	configVarResolver *providerconfig.ConfigVarResolver
+	configVarResolver providerconfig.ConfigVarResolver
 }
 
 // New returns a aws provider.
-func New(configVarResolver *providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
+func New(configVarResolver providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
 	return &provider{configVarResolver: configVarResolver}
 }
 
@@ -99,33 +102,20 @@ var (
 		ec2types.VolumeTypeSt1:      nil,
 	}
 
-	amiFilters = map[providerconfigtypes.OperatingSystem]map[awstypes.CPUArchitecture]amiFilter{
-		// Source: https://wiki.centos.org/Cloud/AWS
-		providerconfigtypes.OperatingSystemCentOS: {
+	amiFilters = map[providerconfig.OperatingSystem]map[awstypes.CPUArchitecture]amiFilter{
+		providerconfig.OperatingSystemRockyLinux: {
 			awstypes.CPUArchitectureX86_64: {
-				description: "CentOS Linux 7* x86_64*",
-				// The AWS marketplace ID from CentOS Community Platform Engineering (CPE)
-				owner: "125523088429",
-			},
-			awstypes.CPUArchitectureARM64: {
-				description: "CentOS Linux 7* aarch64*",
-				// The AWS marketplace ID from CentOS Community Platform Engineering (CPE)
-				owner: "125523088429",
-			},
-		},
-		providerconfigtypes.OperatingSystemRockyLinux: {
-			awstypes.CPUArchitectureX86_64: {
-				description: "Rocky-8-ec2-8*.x86_64",
+				description: "*Rocky-9-EC2-*.x86_64",
 				// The AWS marketplace ID from Rocky Linux Community Platform Engineering (CPE)
 				owner: "792107900819",
 			},
 			awstypes.CPUArchitectureARM64: {
-				description: "Rocky-8-ec2-8*.aarch64",
+				description: "*Rocky-9-EC2-*.aarch64",
 				// The AWS marketplace ID from Rocky Linux Community Platform Engineering (CPE)
 				owner: "792107900819",
 			},
 		},
-		providerconfigtypes.OperatingSystemAmazonLinux2: {
+		providerconfig.OperatingSystemAmazonLinux2: {
 			awstypes.CPUArchitectureX86_64: {
 				description: "Amazon Linux 2 AMI * x86_64 HVM gp2",
 				// The AWS marketplace ID from Amazon
@@ -137,21 +127,21 @@ var (
 				owner: "137112412989",
 			},
 		},
-		providerconfigtypes.OperatingSystemUbuntu: {
+		providerconfig.OperatingSystemUbuntu: {
 			awstypes.CPUArchitectureX86_64: {
 				// Be as precise as possible - otherwise we might get a nightly dev build
-				description: "Canonical, Ubuntu, 22.04 LTS, amd64 jammy image build on ????-??-??",
+				description: "Canonical, Ubuntu, 24.04, amd64 noble image",
 				// The AWS marketplace ID from Canonical
 				owner: "099720109477",
 			},
 			awstypes.CPUArchitectureARM64: {
 				// Be as precise as possible - otherwise we might get a nightly dev build
-				description: "Canonical, Ubuntu, 22.04 LTS, arm64 jammy image build on ????-??-??",
+				description: "Canonical, Ubuntu, 24.04, arm64 noble image",
 				// The AWS marketplace ID from Canonical
 				owner: "099720109477",
 			},
 		},
-		providerconfigtypes.OperatingSystemRHEL: {
+		providerconfig.OperatingSystemRHEL: {
 			awstypes.CPUArchitectureX86_64: {
 				// Be as precise as possible - otherwise we might get a nightly dev build
 				description: "Provided by Red Hat, Inc.",
@@ -165,7 +155,7 @@ var (
 				owner: "309956199498",
 			},
 		},
-		providerconfigtypes.OperatingSystemFlatcar: {
+		providerconfig.OperatingSystemFlatcar: {
 			awstypes.CPUArchitectureX86_64: {
 				// Be as precise as possible - otherwise we might get a nightly dev build
 				description: "Flatcar Container Linux stable *",
@@ -216,7 +206,7 @@ type amiFilter struct {
 	productCode string
 }
 
-func getDefaultAMIID(ctx context.Context, client *ec2.Client, os providerconfigtypes.OperatingSystem, region string, cpuArchitecture awstypes.CPUArchitecture) (string, error) {
+func getDefaultAMIID(ctx context.Context, log *zap.SugaredLogger, client *ec2.Client, os providerconfig.OperatingSystem, region string, cpuArchitecture awstypes.CPUArchitecture) (string, error) {
 	cacheLock.Lock()
 	defer cacheLock.Unlock()
 
@@ -233,7 +223,7 @@ func getDefaultAMIID(ctx context.Context, client *ec2.Client, os providerconfigt
 	cacheKey := fmt.Sprintf("ami-id-%s-%s-%s", region, os, cpuArchitecture)
 	amiID, found := cache.Get(cacheKey)
 	if found {
-		klog.V(3).Info("found AMI-ID in cache!")
+		log.Debugw("Found AMI-ID in cache", "key", cacheKey, "ami", amiID)
 		return amiID.(string), nil
 	}
 
@@ -275,7 +265,7 @@ func getDefaultAMIID(ctx context.Context, client *ec2.Client, os providerconfigt
 		return "", fmt.Errorf("could not find Image for '%s' with arch '%s'", os, cpuArchitecture)
 	}
 
-	if os == providerconfigtypes.OperatingSystemRHEL {
+	if os == providerconfig.OperatingSystemRHEL {
 		imagesOut.Images, err = filterSupportedRHELImages(imagesOut.Images)
 		if err != nil {
 			return "", err
@@ -323,24 +313,22 @@ func getCPUArchitecture(ctx context.Context, client *ec2.Client, instanceType ec
 	return "", errors.New("returned instance type data did not include supported architectures")
 }
 
-func getDefaultRootDevicePath(os providerconfigtypes.OperatingSystem) (string, error) {
+func getDefaultRootDevicePath(os providerconfig.OperatingSystem) (string, error) {
 	const (
 		rootDevicePathSDA  = "/dev/sda1"
 		rootDevicePathXVDA = "/dev/xvda"
 	)
 
 	switch os {
-	case providerconfigtypes.OperatingSystemUbuntu:
+	case providerconfig.OperatingSystemUbuntu:
 		return rootDevicePathSDA, nil
-	case providerconfigtypes.OperatingSystemCentOS:
+	case providerconfig.OperatingSystemRockyLinux:
 		return rootDevicePathSDA, nil
-	case providerconfigtypes.OperatingSystemRockyLinux:
+	case providerconfig.OperatingSystemRHEL:
 		return rootDevicePathSDA, nil
-	case providerconfigtypes.OperatingSystemRHEL:
-		return rootDevicePathSDA, nil
-	case providerconfigtypes.OperatingSystemFlatcar:
+	case providerconfig.OperatingSystemFlatcar:
 		return rootDevicePathXVDA, nil
-	case providerconfigtypes.OperatingSystemAmazonLinux2:
+	case providerconfig.OperatingSystemAmazonLinux2:
 		return rootDevicePathXVDA, nil
 	}
 
@@ -348,8 +336,8 @@ func getDefaultRootDevicePath(os providerconfigtypes.OperatingSystem) (string, e
 }
 
 //gocyclo:ignore
-func (p *provider) getConfig(provSpec clusterv1alpha1.ProviderSpec) (*Config, *providerconfigtypes.Config, *awstypes.RawConfig, error) {
-	pconfig, err := providerconfigtypes.GetConfig(provSpec)
+func (p *provider) getConfig(provSpec clusterv1alpha1.ProviderSpec) (*Config, *providerconfig.Config, *awstypes.RawConfig, error) {
+	pconfig, err := providerconfig.GetConfig(provSpec)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -364,55 +352,55 @@ func (p *provider) getConfig(provSpec clusterv1alpha1.ProviderSpec) (*Config, *p
 	}
 
 	c := Config{}
-	c.AccessKeyID, err = p.configVarResolver.GetConfigVarStringValueOrEnv(rawConfig.AccessKeyID, "AWS_ACCESS_KEY_ID")
+	c.AccessKeyID, err = p.configVarResolver.GetStringValueOrEnv(rawConfig.AccessKeyID, "AWS_ACCESS_KEY_ID")
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to get the value of \"accessKeyId\" field, error = %w", err)
 	}
-	c.SecretAccessKey, err = p.configVarResolver.GetConfigVarStringValueOrEnv(rawConfig.SecretAccessKey, "AWS_SECRET_ACCESS_KEY")
+	c.SecretAccessKey, err = p.configVarResolver.GetStringValueOrEnv(rawConfig.SecretAccessKey, "AWS_SECRET_ACCESS_KEY")
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to get the value of \"secretAccessKey\" field, error = %w", err)
 	}
-	c.Region, err = p.configVarResolver.GetConfigVarStringValue(rawConfig.Region)
+	c.Region, err = p.configVarResolver.GetStringValue(rawConfig.Region)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	c.VpcID, err = p.configVarResolver.GetConfigVarStringValue(rawConfig.VpcID)
+	c.VpcID, err = p.configVarResolver.GetStringValue(rawConfig.VpcID)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	c.SubnetID, err = p.configVarResolver.GetConfigVarStringValue(rawConfig.SubnetID)
+	c.SubnetID, err = p.configVarResolver.GetStringValue(rawConfig.SubnetID)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	c.AvailabilityZone, err = p.configVarResolver.GetConfigVarStringValue(rawConfig.AvailabilityZone)
+	c.AvailabilityZone, err = p.configVarResolver.GetStringValue(rawConfig.AvailabilityZone)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	for _, securityGroupIDRaw := range rawConfig.SecurityGroupIDs {
-		securityGroupID, err := p.configVarResolver.GetConfigVarStringValue(securityGroupIDRaw)
+		securityGroupID, err := p.configVarResolver.GetStringValue(securityGroupIDRaw)
 		if err != nil {
 			return nil, nil, nil, err
 		}
 		c.SecurityGroupIDs = append(c.SecurityGroupIDs, securityGroupID)
 	}
-	c.InstanceProfile, err = p.configVarResolver.GetConfigVarStringValue(rawConfig.InstanceProfile)
+	c.InstanceProfile, err = p.configVarResolver.GetStringValue(rawConfig.InstanceProfile)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 
-	instanceTypeStr, err := p.configVarResolver.GetConfigVarStringValue(rawConfig.InstanceType)
+	instanceTypeStr, err := p.configVarResolver.GetStringValue(rawConfig.InstanceType)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 
 	c.InstanceType = ec2types.InstanceType(instanceTypeStr)
 
-	c.AMI, err = p.configVarResolver.GetConfigVarStringValue(rawConfig.AMI)
+	c.AMI, err = p.configVarResolver.GetStringValue(rawConfig.AMI)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	c.DiskSize = rawConfig.DiskSize
-	diskTypeStr, err := p.configVarResolver.GetConfigVarStringValue(rawConfig.DiskType)
+	diskTypeStr, err := p.configVarResolver.GetStringValue(rawConfig.DiskType)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -420,12 +408,12 @@ func (p *provider) getConfig(provSpec clusterv1alpha1.ProviderSpec) (*Config, *p
 
 	if c.DiskType == ec2types.VolumeTypeIo1 {
 		if rawConfig.DiskIops == nil {
-			return nil, nil, nil, errors.New("Missing required field `diskIops`")
+			return nil, nil, nil, errors.New("missing required field `diskIops`")
 		}
 		iops := *rawConfig.DiskIops
 
 		if iops < 100 || iops > 64000 {
-			return nil, nil, nil, errors.New("Invalid value for `diskIops` (min: 100, max: 64000)")
+			return nil, nil, nil, errors.New("invalid value for `diskIops` (min: 100, max: 64000)")
 		}
 
 		c.DiskIops = rawConfig.DiskIops
@@ -434,13 +422,13 @@ func (p *provider) getConfig(provSpec clusterv1alpha1.ProviderSpec) (*Config, *p
 		iops := *rawConfig.DiskIops
 
 		if iops < 3000 || iops > 64000 {
-			return nil, nil, nil, errors.New("Invalid value for `diskIops` (min: 3000, max: 64000)")
+			return nil, nil, nil, errors.New("invalid value for `diskIops` (min: 3000, max: 64000)")
 		}
 
 		c.DiskIops = rawConfig.DiskIops
 	}
 
-	c.EBSVolumeEncrypted, _, err = p.configVarResolver.GetConfigVarBoolValue(rawConfig.EBSVolumeEncrypted)
+	c.EBSVolumeEncrypted, _, err = p.configVarResolver.GetBoolValue(rawConfig.EBSVolumeEncrypted)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to get ebsVolumeEncrypted value: %w", err)
 	}
@@ -448,30 +436,30 @@ func (p *provider) getConfig(provSpec clusterv1alpha1.ProviderSpec) (*Config, *p
 	c.AssignPublicIP = rawConfig.AssignPublicIP
 	c.IsSpotInstance = rawConfig.IsSpotInstance
 	if rawConfig.SpotInstanceConfig != nil && c.IsSpotInstance != nil && *c.IsSpotInstance {
-		maxPrice, err := p.configVarResolver.GetConfigVarStringValue(rawConfig.SpotInstanceConfig.MaxPrice)
+		maxPrice, err := p.configVarResolver.GetStringValue(rawConfig.SpotInstanceConfig.MaxPrice)
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		c.SpotMaxPrice = pointer.String(maxPrice)
+		c.SpotMaxPrice = ptr.To(maxPrice)
 
-		persistentRequest, _, err := p.configVarResolver.GetConfigVarBoolValue(rawConfig.SpotInstanceConfig.PersistentRequest)
+		persistentRequest, _, err := p.configVarResolver.GetBoolValue(rawConfig.SpotInstanceConfig.PersistentRequest)
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		c.SpotPersistentRequest = pointer.Bool(persistentRequest)
+		c.SpotPersistentRequest = ptr.To(persistentRequest)
 
-		interruptionBehavior, err := p.configVarResolver.GetConfigVarStringValue(rawConfig.SpotInstanceConfig.InterruptionBehavior)
+		interruptionBehavior, err := p.configVarResolver.GetStringValue(rawConfig.SpotInstanceConfig.InterruptionBehavior)
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		c.SpotInterruptionBehavior = pointer.String(interruptionBehavior)
+		c.SpotInterruptionBehavior = ptr.To(interruptionBehavior)
 	}
-	assumeRoleARN, err := p.configVarResolver.GetConfigVarStringValueOrEnv(rawConfig.AssumeRoleARN, "AWS_ASSUME_ROLE_ARN")
+	assumeRoleARN, err := p.configVarResolver.GetStringValueOrEnv(rawConfig.AssumeRoleARN, "AWS_ASSUME_ROLE_ARN")
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	c.AssumeRoleARN = assumeRoleARN
-	assumeRoleExternalID, err := p.configVarResolver.GetConfigVarStringValueOrEnv(rawConfig.AssumeRoleExternalID, "AWS_ASSUME_ROLE_EXTERNAL_ID")
+	assumeRoleExternalID, err := p.configVarResolver.GetStringValueOrEnv(rawConfig.AssumeRoleExternalID, "AWS_ASSUME_ROLE_EXTERNAL_ID")
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -495,7 +483,7 @@ func getAwsConfig(ctx context.Context, id, secret, token, region, assumeRoleARN,
 		stsSvc := sts.NewFromConfig(cfg)
 		creds := stscreds.NewAssumeRoleProvider(stsSvc, assumeRoleARN,
 			func(o *stscreds.AssumeRoleOptions) {
-				o.ExternalID = pointer.String(assumeRoleExternalID)
+				o.ExternalID = ptr.To(assumeRoleExternalID)
 			},
 		)
 
@@ -514,7 +502,7 @@ func getEC2client(ctx context.Context, id, secret, region, assumeRoleArn, assume
 	return ec2.NewFromConfig(cfg), nil
 }
 
-func (p *provider) AddDefaults(spec clusterv1alpha1.MachineSpec) (clusterv1alpha1.MachineSpec, error) {
+func (p *provider) AddDefaults(_ *zap.SugaredLogger, spec clusterv1alpha1.MachineSpec) (clusterv1alpha1.MachineSpec, error) {
 	_, _, rawConfig, err := p.getConfig(spec.ProviderSpec)
 	if err != nil {
 		return spec, err
@@ -535,7 +523,7 @@ func (p *provider) AddDefaults(spec clusterv1alpha1.MachineSpec) (clusterv1alpha
 	return spec, err
 }
 
-func (p *provider) Validate(ctx context.Context, spec clusterv1alpha1.MachineSpec) error {
+func (p *provider) Validate(ctx context.Context, _ *zap.SugaredLogger, spec clusterv1alpha1.MachineSpec) error {
 	config, pc, _, err := p.getConfig(spec.ProviderSpec)
 	if err != nil {
 		return fmt.Errorf("failed to parse config: %w", err)
@@ -578,14 +566,23 @@ func (p *provider) Validate(ctx context.Context, spec clusterv1alpha1.MachineSpe
 	}
 
 	switch f := pc.Network.GetIPFamily(); f {
-	case util.IPFamilyUnspecified, util.IPFamilyIPv4:
+	case net.IPFamilyUnspecified, net.IPFamilyIPv4:
 		// noop
-	case util.IPFamilyIPv6, util.IPFamilyIPv4IPv6, util.IPFamilyIPv6IPv4:
+	case net.IPFamilyIPv6, net.IPFamilyIPv4IPv6, net.IPFamilyIPv6IPv4:
 		if len(vpc.Ipv6CidrBlockAssociationSet) == 0 {
-			return fmt.Errorf("vpc %s does not have IPv6 CIDR block", pointer.StringDeref(vpc.VpcId, ""))
+			return fmt.Errorf("vpc %s does not have IPv6 CIDR block", ptr.Deref(vpc.VpcId, ""))
 		}
 	default:
-		return fmt.Errorf(util.ErrUnknownNetworkFamily, f)
+		return fmt.Errorf(net.ErrUnknownNetworkFamily, f)
+	}
+
+	dnsHostnames, err := areVpcDNSHostnamesEnabled(ctx, ec2Client, config.VpcID)
+	if err != nil {
+		return fmt.Errorf("failed to retrieve VPC attributes: %w", err)
+	}
+
+	if !dnsHostnames {
+		return fmt.Errorf("vpc %s does not have the enableDnsHostname attribute enabled, new machines in this VPC would be incompatible with Kubernetes", config.VpcID)
 	}
 
 	_, err = ec2Client.DescribeAvailabilityZones(ctx, &ec2.DescribeAvailabilityZonesInput{ZoneNames: []string{config.AvailabilityZone}})
@@ -633,13 +630,30 @@ func getVpc(ctx context.Context, client *ec2.Client, id string) (*ec2types.Vpc, 
 	}
 
 	if len(vpcOut.Vpcs) != 1 {
-		return nil, fmt.Errorf("unable to find specified vpc with id %q", id)
+		return nil, fmt.Errorf("failed to find specified vpc with id %q", id)
 	}
 
 	return &vpcOut.Vpcs[0], nil
 }
 
-func (p *provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData, userdata string) (instance.Instance, error) {
+func areVpcDNSHostnamesEnabled(ctx context.Context, client *ec2.Client, id string) (bool, error) {
+	out, err := client.DescribeVpcAttribute(ctx, &ec2.DescribeVpcAttributeInput{
+		VpcId:     &id,
+		Attribute: ec2types.VpcAttributeNameEnableDnsHostnames,
+	})
+
+	if err != nil {
+		return false, awsErrorToTerminalError(err, "failed to describe vpc attributes")
+	}
+
+	if out.EnableDnsHostnames == nil {
+		return false, errors.New("API response does not include expected field enableDnsHostnames")
+	}
+
+	return *out.EnableDnsHostnames.Value, nil
+}
+
+func (p *provider) Create(ctx context.Context, log *zap.SugaredLogger, machine *clusterv1alpha1.Machine, _ *cloudprovidertypes.ProviderData, userdata string) (instance.Instance, error) {
 	config, pc, _, err := p.getConfig(machine.Spec.ProviderSpec)
 	if err != nil {
 		return nil, cloudprovidererrors.TerminalError{
@@ -670,7 +684,7 @@ func (p *provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine,
 			}
 		}
 
-		if amiID, err = getDefaultAMIID(ctx, ec2Client, pc.OperatingSystem, config.Region, cpuArchitecture); err != nil {
+		if amiID, err = getDefaultAMIID(ctx, log, ec2Client, pc.OperatingSystem, config.Region, cpuArchitecture); err != nil {
 			return nil, cloudprovidererrors.TerminalError{
 				Reason:  common.InvalidConfigurationMachineError,
 				Message: fmt.Sprintf("Failed to get AMI-ID for operating system %s in region %s: %v", pc.OperatingSystem, config.Region, err),
@@ -678,9 +692,9 @@ func (p *provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine,
 		}
 	}
 
-	if pc.OperatingSystem != providerconfigtypes.OperatingSystemFlatcar {
+	if pc.OperatingSystem != providerconfig.OperatingSystemFlatcar {
 		// Gzip the userdata in case we don't use Flatcar
-		userdata, err = convert.GzipString(userdata)
+		userdata, err = gzipString(userdata)
 		if err != nil {
 			return nil, fmt.Errorf("failed to gzip the userdata")
 		}
@@ -734,6 +748,9 @@ func (p *provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine,
 	assignPublicIP := config.AssignPublicIP == nil || *config.AssignPublicIP
 
 	instanceRequest := &ec2.RunInstancesInput{
+		MetadataOptions: &ec2types.InstanceMetadataOptionsRequest{
+			HttpPutResponseHopLimit: aws.Int32(awsMetadataHTTPPutResponseHopLimit),
+		},
 		ImageId:               aws.String(amiID),
 		InstanceMarketOptions: instanceMarketOptions,
 		BlockDeviceMappings: []ec2types.BlockDeviceMapping{
@@ -744,7 +761,7 @@ func (p *provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine,
 					DeleteOnTermination: aws.Bool(true),
 					VolumeType:          config.DiskType,
 					Iops:                config.DiskIops,
-					Encrypted:           pointer.Bool(config.EBSVolumeEncrypted),
+					Encrypted:           ptr.To(config.EBSVolumeEncrypted),
 				},
 			},
 		},
@@ -791,7 +808,7 @@ func (p *provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine,
 	return &awsInstance{instance: &runOut.Instances[0]}, nil
 }
 
-func (p *provider) Cleanup(ctx context.Context, machine *clusterv1alpha1.Machine, _ *cloudprovidertypes.ProviderData) (bool, error) {
+func (p *provider) Cleanup(ctx context.Context, log *zap.SugaredLogger, machine *clusterv1alpha1.Machine, _ *cloudprovidertypes.ProviderData) (bool, error) {
 	ec2instance, err := p.get(ctx, machine)
 	if err != nil {
 		if errors.Is(err, cloudprovidererrors.ErrInstanceNotFound) {
@@ -800,7 +817,7 @@ func (p *provider) Cleanup(ctx context.Context, machine *clusterv1alpha1.Machine
 		return false, err
 	}
 
-	// (*Config, *providerconfigtypes.Config, *awstypes.RawConfig, error)
+	// (*Config, *providerconfig.Config, *awstypes.RawConfig, error)
 	config, _, _, err := p.getConfig(machine.Spec.ProviderSpec)
 
 	if err != nil {
@@ -826,7 +843,7 @@ func (p *provider) Cleanup(ctx context.Context, machine *clusterv1alpha1.Machine
 		}
 
 		if cOut.CancelledSpotInstanceRequests[0].State == ec2types.CancelSpotInstanceRequestStateCancelled {
-			klog.V(3).Infof("successfully canceled spot instance request %s at aws", *ec2instance.instance.SpotInstanceRequestId)
+			log.Infow("Successfully canceled spot instance request", "request", *ec2instance.instance.SpotInstanceRequestId)
 		}
 	}
 
@@ -838,13 +855,13 @@ func (p *provider) Cleanup(ctx context.Context, machine *clusterv1alpha1.Machine
 	}
 
 	if tOut.TerminatingInstances[0].PreviousState.Name != tOut.TerminatingInstances[0].CurrentState.Name {
-		klog.V(3).Infof("successfully triggered termination of instance %s at aws", ec2instance.ID())
+		log.Infow("Successfully triggered termination of instance", "instance", ec2instance.ID())
 	}
 
 	return false, nil
 }
 
-func (p *provider) Get(ctx context.Context, machine *clusterv1alpha1.Machine, _ *cloudprovidertypes.ProviderData) (instance.Instance, error) {
+func (p *provider) Get(ctx context.Context, _ *zap.SugaredLogger, machine *clusterv1alpha1.Machine, _ *cloudprovidertypes.ProviderData) (instance.Instance, error) {
 	return p.get(ctx, machine)
 }
 
@@ -891,28 +908,6 @@ func (p *provider) get(ctx context.Context, machine *clusterv1alpha1.Machine) (*
 	return nil, cloudprovidererrors.ErrInstanceNotFound
 }
 
-func (p *provider) GetCloudConfig(spec clusterv1alpha1.MachineSpec) (config string, name string, err error) {
-	c, _, _, err := p.getConfig(spec.ProviderSpec)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to parse config: %w", err)
-	}
-
-	cc := &awstypes.CloudConfig{
-		Global: awstypes.GlobalOpts{
-			VPC:      c.VpcID,
-			SubnetID: c.SubnetID,
-			Zone:     c.AvailabilityZone,
-		},
-	}
-
-	s, err := awstypes.CloudConfigToString(cc)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to convert cloud-config to string: %w", err)
-	}
-
-	return s, "aws", nil
-}
-
 func (p *provider) MachineMetricsLabels(machine *clusterv1alpha1.Machine) (map[string]string, error) {
 	labels := make(map[string]string)
 
@@ -927,7 +922,7 @@ func (p *provider) MachineMetricsLabels(machine *clusterv1alpha1.Machine) (map[s
 	return labels, err
 }
 
-func (p *provider) MigrateUID(ctx context.Context, machine *clusterv1alpha1.Machine, newUID types.UID) error {
+func (p *provider) MigrateUID(ctx context.Context, _ *zap.SugaredLogger, machine *clusterv1alpha1.Machine, newUID types.UID) error {
 	machineInstance, err := p.get(ctx, machine)
 	if err != nil {
 		if errors.Is(err, cloudprovidererrors.ErrInstanceNotFound) {
@@ -968,7 +963,7 @@ func (d *awsInstance) Name() string {
 }
 
 func (d *awsInstance) ID() string {
-	return pointer.StringDeref(d.instance.InstanceId, "")
+	return ptr.Deref(d.instance.InstanceId, "")
 }
 
 func (d *awsInstance) ProviderID() string {
@@ -982,22 +977,22 @@ func (d *awsInstance) ProviderID() string {
 	return "aws:///" + *d.instance.Placement.AvailabilityZone + "/" + *d.instance.InstanceId
 }
 
-func (d *awsInstance) Addresses() map[string]v1.NodeAddressType {
-	addresses := map[string]v1.NodeAddressType{
-		pointer.StringDeref(d.instance.PublicIpAddress, ""):  v1.NodeExternalIP,
-		pointer.StringDeref(d.instance.PublicDnsName, ""):    v1.NodeExternalDNS,
-		pointer.StringDeref(d.instance.PrivateIpAddress, ""): v1.NodeInternalIP,
-		pointer.StringDeref(d.instance.PrivateDnsName, ""):   v1.NodeInternalDNS,
+func (d *awsInstance) Addresses() map[string]corev1.NodeAddressType {
+	addresses := map[string]corev1.NodeAddressType{
+		ptr.Deref(d.instance.PublicIpAddress, ""):  corev1.NodeExternalIP,
+		ptr.Deref(d.instance.PublicDnsName, ""):    corev1.NodeExternalDNS,
+		ptr.Deref(d.instance.PrivateIpAddress, ""): corev1.NodeInternalIP,
+		ptr.Deref(d.instance.PrivateDnsName, ""):   corev1.NodeInternalDNS,
 	}
 
 	for _, netInterface := range d.instance.NetworkInterfaces {
 		for _, addr := range netInterface.Ipv6Addresses {
-			ipAddr := pointer.StringDeref(addr.Ipv6Address, "")
+			ipAddr := ptr.Deref(addr.Ipv6Address, "")
 
 			// link-local addresses not very useful in machine status
 			// filter them out
-			if !util.IsLinkLocal(ipAddr) {
-				addresses[ipAddr] = v1.NodeExternalIP
+			if !net.IsLinkLocal(ipAddr) {
+				addresses[ipAddr] = corev1.NodeExternalIP
 			}
 		}
 	}
@@ -1073,11 +1068,7 @@ func awsErrorToTerminalError(err error, msg string) error {
 }
 
 func setProviderSpec(rawConfig awstypes.RawConfig, provSpec clusterv1alpha1.ProviderSpec) (*runtime.RawExtension, error) {
-	if provSpec.Value == nil {
-		return nil, fmt.Errorf("machine.spec.providerconfig.value is nil")
-	}
-
-	pconfig, err := providerconfigtypes.GetConfig(provSpec)
+	pconfig, err := providerconfig.GetConfig(provSpec)
 	if err != nil {
 		return nil, err
 	}
@@ -1185,13 +1176,13 @@ func getInstanceCountForMachine(machine clusterv1alpha1.Machine, reservations []
 func filterSupportedRHELImages(images []ec2types.Image) ([]ec2types.Image, error) {
 	var filteredImages []ec2types.Image
 	for _, image := range images {
-		if strings.HasPrefix(*image.Name, "RHEL-8") {
+		if strings.HasPrefix(*image.Name, "RHEL-9") {
 			filteredImages = append(filteredImages, image)
 		}
 	}
 
 	if filteredImages == nil {
-		return nil, errors.New("rhel 8 images are not found")
+		return nil, errors.New("rhel 9 images are not found")
 	}
 
 	return filteredImages, nil
@@ -1205,7 +1196,7 @@ func filterSupportedRHELImages(images []ec2types.Image) ([]ec2types.Image, error
 // This happens more often in some AWS regions because some regions have
 // slower instance creation (e.g. us-east-1 and us-west-2).
 func (p *provider) waitForInstance(ctx context.Context, machine *clusterv1alpha1.Machine) error {
-	return wait.PollImmediate(pollInterval, pollTimeout, func() (bool, error) {
+	return wait.PollUntilContextTimeout(ctx, pollInterval, pollTimeout, false, func(ctx context.Context) (bool, error) {
 		_, err := p.get(ctx, machine)
 		if errors.Is(err, cloudprovidererrors.ErrInstanceNotFound) {
 			// Retry if instance is not found

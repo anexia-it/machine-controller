@@ -19,27 +19,18 @@ package plugins
 import (
 	"context"
 
+	"go.uber.org/zap"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 )
-
-type Driver string
-
-const Tinkerbell Driver = "tinkerbell"
-
-type CloudConfigSettings struct {
-	Token       string
-	Namespace   string
-	SecretName  string
-	ClusterHost string
-}
 
 // PluginDriver manages the communications between the machine controller cloud provider and the bare metal env.
 type PluginDriver interface {
-	GetServer(context.Context, types.UID, runtime.RawExtension) (Server, error)
+	GetServer(context.Context) (Server, error)
 	Validate(runtime.RawExtension) error
-	ProvisionServer(context.Context, types.UID, *CloudConfigSettings, runtime.RawExtension) (Server, error)
-	DeprovisionServer(context.Context, types.UID) error
+	ProvisionServer(context.Context, *zap.SugaredLogger, metav1.ObjectMeta, runtime.RawExtension, string) (Server, error)
+	DeprovisionServer(context.Context) error
 }
 
 // Server represents the server/instance which exists in the bare metal env.

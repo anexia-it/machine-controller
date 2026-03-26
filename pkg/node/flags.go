@@ -22,7 +22,7 @@ import (
 	"strconv"
 	"strings"
 
-	machinecontroller "github.com/kubermatic/machine-controller/pkg/controller/machine"
+	machinecontroller "k8c.io/machine-controller/pkg/controller/machine"
 )
 
 func NewFlags(flagset *flag.FlagSet) *Flags {
@@ -30,7 +30,6 @@ func NewFlags(flagset *flag.FlagSet) *Flags {
 		FlagSet: flagset,
 	}
 
-	settings.BoolVar(&settings.externalCloudProvider, "external-cloud-provider", false, "[DEPRECATED replaced by -node-external-cloud-provider] when set, kubelets will receive --cloud-provider=external flag")
 	settings.BoolVar(&settings.externalCloudProvider, "node-external-cloud-provider", false, "when set, kubelets will receive --cloud-provider=external flag")
 	settings.StringVar(&settings.kubeletFeatureGates, "node-kubelet-feature-gates", "RotateKubeletServerCertificate=true", "Feature gates to set on the kubelet")
 

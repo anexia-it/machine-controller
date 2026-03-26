@@ -20,16 +20,13 @@ import (
 	"context"
 	"fmt"
 
-	clusterv1alpha1 "github.com/kubermatic/machine-controller/pkg/apis/cluster/v1alpha1"
+	clusterv1alpha1 "k8c.io/machine-controller/sdk/apis/cluster/v1alpha1"
 
 	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrlruntimeclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// LegacyMachineControllerUserDataLabel is set to true when machine-controller is used for managing machine configuration.
-const LegacyMachineControllerUserDataLabel = "machine.clusters.k8s.io/legacy-machine-controller-user-data"
-
-func GetMachineDeploymentNameAndRevisionForMachine(ctx context.Context, machine *clusterv1alpha1.Machine, c client.Client) (string, string, error) {
+func GetMachineDeploymentNameAndRevisionForMachine(ctx context.Context, machine *clusterv1alpha1.Machine, c ctrlruntimeclient.Client) (string, string, error) {
 	var (
 		machineSetName        string
 		machineDeploymentName string
@@ -42,7 +39,7 @@ func GetMachineDeploymentNameAndRevisionForMachine(ctx context.Context, machine 
 
 	if machineSetName != "" {
 		machineSet := &clusterv1alpha1.MachineSet{}
-		if err := c.Get(ctx, types.NamespacedName{Name: machineSetName, Namespace: "kube-system"}, machineSet); err != nil {
+		if err := c.Get(ctx, types.NamespacedName{Name: machineSetName, Namespace: machine.Namespace}, machineSet); err != nil {
 			return "", "", err
 		}
 

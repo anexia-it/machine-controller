@@ -25,17 +25,19 @@ import (
 	"reflect"
 	"testing"
 
-	kubevirtv1 "kubevirt.io/api/core/v1"
+	"github.com/google/go-cmp/cmp"
+	kubevirtcorev1 "kubevirt.io/api/core/v1"
+	cdicorev1beta1 "kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
 
-	cloudprovidertesting "github.com/kubermatic/machine-controller/pkg/cloudprovider/testing"
-	"github.com/kubermatic/machine-controller/pkg/providerconfig"
+	cloudprovidertesting "k8c.io/machine-controller/pkg/cloudprovider/testing"
+	"k8c.io/machine-controller/sdk/cloudprovider/kubevirt"
+	"k8c.io/machine-controller/sdk/providerconfig/configvar"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
-	"k8s.io/apimachinery/pkg/util/diff"
 	ctrlruntimeclient "sigs.k8s.io/controller-runtime/pkg/client"
 	fakectrlruntimeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -45,7 +47,7 @@ var (
 	vmManifestsFS embed.FS
 	vmDir         = "testdata"
 	fakeclient    ctrlruntimeclient.WithWatch
-	expectedVms   map[string]*kubevirtv1.VirtualMachine
+	expectedVms   map[string]*kubevirtcorev1.VirtualMachine
 )
 
 func init() {
@@ -56,14 +58,21 @@ func init() {
 
 type kubevirtProviderSpecConf struct {
 	OsImageDV                string // if OsImage from DV and not from http source
-	Instancetype             *kubevirtv1.InstancetypeMatcher
-	Preference               *kubevirtv1.PreferenceMatcher
+	Instancetype             *kubevirtcorev1.InstancetypeMatcher
+	Preference               *kubevirtcorev1.PreferenceMatcher
+	StorageTarget            StorageTarget
 	OperatingSystem          string
 	TopologySpreadConstraint bool
 	Affinity                 bool
 	AffinityValues           bool
 	SecondaryDisks           bool
 	OsImageSource            imageSource
+	OsImageSourceURL         string
+	PullMethod               cdicorev1beta1.RegistryPullMethod
+	ProviderNetwork          *kubevirt.ProviderNetwork
+	ExtraHeadersSet          bool
+	EvictStrategy            string
+	VCPUs                    uint32
 }
 
 func (k kubevirtProviderSpecConf) rawProviderSpec(t *testing.T) []byte {
@@ -97,6 +106,20 @@ func (k kubevirtProviderSpecConf) rawProviderSpec(t *testing.T) []byte {
 		},
 		{{- end }}
 		"virtualMachine": {
+            {{- if .EvictStrategy }}
+            "evictionStrategy": "LiveMigrate",
+            {{- end }}
+            {{- if .ProviderNetwork }}
+            "providerNetwork": {
+               "name": "kubeovn",
+               "vpc": {
+                 "name": "test-vpc",
+                 "subnet": {
+                   "name": "test-subnet"
+                 }
+               }
+            },
+            {{- end }}
 			{{- if .Instancetype }}
 			"instancetype": {
 				"name": "{{ .Instancetype.Name }}",
@@ -110,21 +133,39 @@ func (k kubevirtProviderSpecConf) rawProviderSpec(t *testing.T) []byte {
 			},
 			{{- end }}
 			"template": {
+				{{- if .VCPUs }}
+				"vcpus": {
+					"cores": {{ .VCPUs }}
+				},
+				{{- else }}
 				"cpus": "2",
+				{{- end }}
 				"memory": "2Gi",
 				{{- if .SecondaryDisks }}
 				"secondaryDisks": [{
 					"size": "20Gi",
+                    "storageAccessType": "ReadWriteMany",
 					"storageClassName": "longhorn2"},{
 					"size": "30Gi",
+                    "storageAccessType": "ReadWriteMany",
 					"storageClassName": "longhorn3"}],
 				{{- end }}
 				"primaryDisk": {
+                    {{- if .ExtraHeadersSet }}
+                    "extraHeaders": ["authorization: Basic bXE6cGFzc3dvcmQ="],
+                    {{- end }}
+                    "storageAccessType": "ReadWriteMany",
+					{{- if .StorageTarget }}
+					"storageTarget": "{{ .StorageTarget }}",
+					{{- end }}
 					{{- if .OsImageDV }}
 					"osImage": "{{ .OsImageDV }}",
 					{{- else }}
-					"osImage": "http://x.y.z.t/ubuntu.img",
+					"osImage": "{{ if .OsImageSourceURL }}{{ .OsImageSourceURL }}{{ else }}http://x.y.z.t/ubuntu.img{{ end }}",
 					{{- end }}
+					{{- if .PullMethod }}
+					"pullMethod": "{{ .PullMethod }}",
+					{{- end}}
 					"size": "10Gi",
 					{{- if .OsImageSource }}
 					"source": "{{ .OsImageSource }}",
@@ -167,13 +208,19 @@ func TestNewVirtualMachine(t *testing.T) {
 			specConf: kubevirtProviderSpecConf{},
 		},
 		{
+			name: "extra-headers-set",
+			specConf: kubevirtProviderSpecConf{
+				ExtraHeadersSet: true,
+			},
+		},
+		{
 			name: "instancetype-preference-standard",
 			specConf: kubevirtProviderSpecConf{
-				Instancetype: &kubevirtv1.InstancetypeMatcher{
+				Instancetype: &kubevirtcorev1.InstancetypeMatcher{
 					Name: "standard-it",
 					Kind: "VirtualMachineInstancetype",
 				},
-				Preference: &kubevirtv1.PreferenceMatcher{
+				Preference: &kubevirtcorev1.PreferenceMatcher{
 					Name: "standard-pref",
 					Kind: "VirtualMachinePreference",
 				},
@@ -182,15 +229,22 @@ func TestNewVirtualMachine(t *testing.T) {
 		{
 			name: "instancetype-preference-custom",
 			specConf: kubevirtProviderSpecConf{
-				Instancetype: &kubevirtv1.InstancetypeMatcher{
+				Instancetype: &kubevirtcorev1.InstancetypeMatcher{
 					Name: "custom-it",
 					Kind: "VirtualMachineClusterInstancetype",
 				},
-				Preference: &kubevirtv1.PreferenceMatcher{
+				Preference: &kubevirtcorev1.PreferenceMatcher{
 					Name: "custom-pref",
 					Kind: "VirtualMachineClusterPreference",
 				},
 			},
+		},
+		{
+			name: "kubeovn-provider-network",
+			specConf: kubevirtProviderSpecConf{
+				ProviderNetwork: &kubevirt.ProviderNetwork{Name: "KubeOVN", VPC: kubevirt.VPC{Name: "test-vpc", Subnet: &kubevirt.Subnet{
+					Name: "test-subnet",
+				}}}},
 		},
 		{
 			name:     "topologyspreadconstraints",
@@ -213,19 +267,39 @@ func TestNewVirtualMachine(t *testing.T) {
 			specConf: kubevirtProviderSpecConf{OsImageDV: "ns/dvname"},
 		},
 		{
+			name:     "use-storage-as-storage-target",
+			specConf: kubevirtProviderSpecConf{StorageTarget: Storage},
+		},
+		{
 			name:     "http-image-source",
 			specConf: kubevirtProviderSpecConf{OsImageSource: httpSource},
 		},
 		{
+			name:     "registry-image-source",
+			specConf: kubevirtProviderSpecConf{OsImageSource: registrySource, OsImageSourceURL: "docker://x.y.z.t/ubuntu.img:latest"},
+		},
+		{
+			name:     "registry-image-source-pod",
+			specConf: kubevirtProviderSpecConf{OsImageSource: registrySource, OsImageSourceURL: "docker://x.y.z.t/ubuntu.img:latest", PullMethod: cdicorev1beta1.RegistryPullPod},
+		},
+		{
 			name:     "pvc-image-source",
 			specConf: kubevirtProviderSpecConf{OsImageSource: pvcSource, OsImageDV: "ns/dvname"},
+		},
+		{
+			name:     "eviction-strategy-live-migrate",
+			specConf: kubevirtProviderSpecConf{EvictStrategy: "LiveMigrate"},
+		},
+		{
+			name:     "dedicated-vcpus",
+			specConf: kubevirtProviderSpecConf{VCPUs: 2},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			p := &provider{
 				// Note that configVarResolver is not used in this test as the getConfigFunc is mocked.
-				configVarResolver: providerconfig.NewConfigVarResolver(context.Background(), fakeclient),
+				configVarResolver: configvar.NewResolver(context.Background(), fakeclient),
 			}
 
 			machine := cloudprovidertesting.Creator{
@@ -240,13 +314,16 @@ func TestNewVirtualMachine(t *testing.T) {
 			}
 			// Do not rely on POD_NAMESPACE env variable, force to known value
 			c.Namespace = testNamespace
+			labels := map[string]string{}
 
 			// Check the created VirtualMachine
-			vm, _ := p.newVirtualMachine(context.TODO(), c, pc, machine, "udsn", userdata, fakeMachineDeploymentNameAndRevisionForMachineGetter(), fixedMacAddressGetter, fakeclient)
-			vm.TypeMeta.APIVersion, vm.TypeMeta.Kind = kubevirtv1.VirtualMachineGroupVersionKind.ToAPIVersionAndKind()
+			vm, _ := p.newVirtualMachine(c, pc, machine, labels, "udsn", userdata, fakeMachineDeploymentNameAndRevisionForMachineGetter())
+			vm.APIVersion, vm.Kind = kubevirtcorev1.VirtualMachineGroupVersionKind.ToAPIVersionAndKind()
 
 			if !equality.Semantic.DeepEqual(vm, expectedVms[tt.name]) {
-				t.Errorf("Diff %v", diff.ObjectGoPrintDiff(expectedVms[tt.name], vm))
+				if diff := cmp.Diff(expectedVms[tt.name], vm); diff != "" {
+					t.Errorf("Diff:\n%s", diff)
+				}
 			}
 		})
 	}
@@ -258,18 +335,14 @@ func fakeMachineDeploymentNameAndRevisionForMachineGetter() machineDeploymentNam
 	}
 }
 
-func toVirtualMachines(objects []runtime.Object) map[string]*kubevirtv1.VirtualMachine {
-	vms := make(map[string]*kubevirtv1.VirtualMachine)
+func toVirtualMachines(objects []runtime.Object) map[string]*kubevirtcorev1.VirtualMachine {
+	vms := make(map[string]*kubevirtcorev1.VirtualMachine)
 	for _, o := range objects {
-		if vm, ok := o.(*kubevirtv1.VirtualMachine); ok {
+		if vm, ok := o.(*kubevirtcorev1.VirtualMachine); ok {
 			vms[vm.Name] = vm
 		}
 	}
 	return vms
-}
-
-func fixedMacAddressGetter() (string, error) {
-	return "b6:f5:b4:fe:45:1d", nil
 }
 
 // runtimeFromYaml returns a list of Kubernetes runtime objects from their yaml templates.

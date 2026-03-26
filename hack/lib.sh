@@ -52,7 +52,7 @@ is_containerized() {
 
 containerize() {
   local cmd="$1"
-  local image="${CONTAINERIZE_IMAGE:-quay.io/kubermatic/util:2.2.0}"
+  local image="${CONTAINERIZE_IMAGE:-quay.io/kubermatic/util:2.7.0}"
   local gocache="${CONTAINERIZE_GOCACHE:-/tmp/.gocache}"
   local gomodcache="${CONTAINERIZE_GOMODCACHE:-/tmp/.gomodcache}"
   local skip="${NO_CONTAINERIZE:-}"
@@ -140,7 +140,7 @@ retry() {
   actual_retry $@
   rc=$?
   set -e
-  elapsed_time=$(($(date +%s) - $start_time))
+  elapsed_time=$(($(date +%s) - start_time))
   write_junit "$rc" "$elapsed_time"
   return $rc
 }

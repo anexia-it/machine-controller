@@ -21,15 +21,15 @@ import (
 	"encoding/json"
 	"fmt"
 
-	clusterv1alpha1 "github.com/kubermatic/machine-controller/pkg/apis/cluster/v1alpha1"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/instance"
-	cloudprovidertypes "github.com/kubermatic/machine-controller/pkg/cloudprovider/types"
-	"github.com/kubermatic/machine-controller/pkg/providerconfig"
-	providerconfigtypes "github.com/kubermatic/machine-controller/pkg/providerconfig/types"
+	"go.uber.org/zap"
+
+	"k8c.io/machine-controller/pkg/cloudprovider/instance"
+	cloudprovidertypes "k8c.io/machine-controller/pkg/cloudprovider/types"
+	clusterv1alpha1 "k8c.io/machine-controller/sdk/apis/cluster/v1alpha1"
+	"k8c.io/machine-controller/sdk/providerconfig"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/klog"
 )
 
 type provider struct{}
@@ -61,17 +61,17 @@ func (f CloudProviderInstance) Status() instance.Status {
 }
 
 // New returns a fake cloud provider.
-func New(_ *providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
+func New(_ providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
 	return &provider{}
 }
 
-func (p *provider) AddDefaults(spec clusterv1alpha1.MachineSpec) (clusterv1alpha1.MachineSpec, error) {
+func (p *provider) AddDefaults(_ *zap.SugaredLogger, spec clusterv1alpha1.MachineSpec) (clusterv1alpha1.MachineSpec, error) {
 	return spec, nil
 }
 
 // Validate returns success or failure based according to its FakeCloudProviderSpec.
-func (p *provider) Validate(_ context.Context, machinespec clusterv1alpha1.MachineSpec) error {
-	pconfig, err := providerconfigtypes.GetConfig(machinespec.ProviderSpec)
+func (p *provider) Validate(_ context.Context, log *zap.SugaredLogger, machinespec clusterv1alpha1.MachineSpec) error {
+	pconfig, err := providerconfig.GetConfig(machinespec.ProviderSpec)
 	if err != nil {
 		return err
 	}
@@ -82,32 +82,28 @@ func (p *provider) Validate(_ context.Context, machinespec clusterv1alpha1.Machi
 	}
 
 	if fakeCloudProviderSpec.PassValidation {
-		klog.V(3).Infof("succeeding validation as requested")
+		log.Debug("Succeeding validation as requested")
 		return nil
 	}
 
-	klog.V(3).Infof("failing validation as requested")
+	log.Debug("Failing validation as requested")
 	return fmt.Errorf("failing validation as requested")
 }
 
-func (p *provider) Get(_ context.Context, _ *clusterv1alpha1.Machine, _ *cloudprovidertypes.ProviderData) (instance.Instance, error) {
+func (p *provider) Get(_ context.Context, _ *zap.SugaredLogger, _ *clusterv1alpha1.Machine, _ *cloudprovidertypes.ProviderData) (instance.Instance, error) {
 	return CloudProviderInstance{}, nil
-}
-
-func (p *provider) GetCloudConfig(_ clusterv1alpha1.MachineSpec) (string, string, error) {
-	return "", "", nil
 }
 
 // Create creates a cloud instance according to the given machine.
-func (p *provider) Create(_ context.Context, _ *clusterv1alpha1.Machine, _ *cloudprovidertypes.ProviderData, _ string) (instance.Instance, error) {
+func (p *provider) Create(_ context.Context, _ *zap.SugaredLogger, _ *clusterv1alpha1.Machine, _ *cloudprovidertypes.ProviderData, _ string) (instance.Instance, error) {
 	return CloudProviderInstance{}, nil
 }
 
-func (p *provider) Cleanup(_ context.Context, _ *clusterv1alpha1.Machine, _ *cloudprovidertypes.ProviderData) (bool, error) {
+func (p *provider) Cleanup(_ context.Context, _ *zap.SugaredLogger, _ *clusterv1alpha1.Machine, _ *cloudprovidertypes.ProviderData) (bool, error) {
 	return true, nil
 }
 
-func (p *provider) MigrateUID(_ context.Context, _ *clusterv1alpha1.Machine, _ types.UID) error {
+func (p *provider) MigrateUID(_ context.Context, _ *zap.SugaredLogger, _ *clusterv1alpha1.Machine, _ types.UID) error {
 	return nil
 }
 

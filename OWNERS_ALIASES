@@ -2,18 +2,18 @@
 # To change team associations, update the GitHub teams via https://github.com/kubermatic/access.
 
 aliases:
-  machine-controller-maintainers:
+  sig-cluster-management:
+    - adoi
     - ahmedwaleedmalik
-    - embik
-    - hdurand0710
+    - buraksekili
+    - cnvergence
+    - julioc-p
     - kron4eg
-    - mfranczy
+    - mgoltzsche
     - moadqassem
     - moelsayed
-    - sankalp-r
-    - themue
+    - mohamed-rafraf
+    - rajasahil
+    - soer3n
     - xmudrii
     - xrstf
-  sig-virtualization:
-    - hdurand0710
-    - mfranczy

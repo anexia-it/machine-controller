@@ -30,20 +30,22 @@ import (
 	"github.com/gophercloud/gophercloud/openstack/compute/v2/servers"
 	th "github.com/gophercloud/gophercloud/testhelper"
 	"github.com/gophercloud/gophercloud/testhelper/client"
+	"go.uber.org/zap"
 
-	"github.com/kubermatic/machine-controller/pkg/apis/cluster/v1alpha1"
-	cloudprovidertesting "github.com/kubermatic/machine-controller/pkg/cloudprovider/testing"
-	cloudprovidertypes "github.com/kubermatic/machine-controller/pkg/cloudprovider/types"
-	"github.com/kubermatic/machine-controller/pkg/providerconfig"
+	cloudprovidertesting "k8c.io/machine-controller/pkg/cloudprovider/testing"
+	cloudprovidertypes "k8c.io/machine-controller/pkg/cloudprovider/types"
+	clusterv1alpha1 "k8c.io/machine-controller/sdk/apis/cluster/v1alpha1"
+	"k8c.io/machine-controller/sdk/providerconfig/configvar"
 
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 	fakectrlruntimeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 const expectedServerRequest = `{
   "server": {
 	  "availability_zone": "eu-de-01",
+	  "config_drive": false,
 	  "flavorRef": "1",
 	  "imageRef": "1bea47ed-f6a9-463b-b423-14b9cca9ad27",
 	  "metadata": {
@@ -65,12 +67,12 @@ const expectedServerRequest = `{
 	  ],
 	  "user_data": "ZmFrZS11c2VyZGF0YQ=="
   }
-}
-`
+}`
 
 const expectedBlockDeviceBootRequest = `{
   "server": {
 	"availability_zone": "eu-de-01",
+	"config_drive": false,
 	"block_device_mapping_v2": [
 	  {
 		"boot_index": 0,
@@ -107,6 +109,7 @@ const expectedBlockDeviceBootRequest = `{
 const expectedBlockDeviceBootVolumeTypeRequest = `{
 	"server": {
 	  "availability_zone": "eu-de-01",
+	  "config_drive": false,
 	  "block_device_mapping_v2": [
 		{
 		  "boot_index": 0,
@@ -141,6 +144,36 @@ const expectedBlockDeviceBootVolumeTypeRequest = `{
 	}
   }`
 
+const expectedMultipleNetworksRequest = `{
+  "server": {
+	  "availability_zone": "eu-de-01",
+	  "config_drive": false,
+	  "flavorRef": "1",
+	  "imageRef": "1bea47ed-f6a9-463b-b423-14b9cca9ad27",
+	  "metadata": {
+		"kubernetes-cluster": "xyz",
+		"machine-uid": "",
+		"system-cluster": "zyx",
+		"system-project": "xxx"
+	  },
+	  "name": "test",
+	  "networks": [
+		{
+		  "uuid": "d32019d3-bc6e-4319-9c1d-6722fc136a22"
+		},
+		{
+		  "uuid": "1df1458e-bd0c-423d-b201-2e5f56c94714"
+		}
+	  ],
+	  "security_groups": [
+		{
+		  "name": "kubernetes-xyz"
+		}
+	  ],
+	  "user_data": "ZmFrZS11c2VyZGF0YQ=="
+  }
+}`
+
 type openstackProviderSpecConf struct {
 	IdentityEndpointURL         string
 	RootDiskSizeGB              *int32
@@ -151,70 +184,97 @@ type openstackProviderSpecConf struct {
 	ProjectID                   string
 	TenantID                    string
 	TenantName                  string
+	ConfigDrive                 bool
 	ComputeAPIVersion           string
+	Network                     string
+	Networks                    []string
+	Subnet                      string
 }
 
 func (o openstackProviderSpecConf) rawProviderSpec(t *testing.T) []byte {
 	var out bytes.Buffer
-	tmpl, err := template.New("test").Parse(`{
-	"cloudProvider": "openstack",
-	"cloudProviderSpec": {
-		"availabilityZone": "eu-de-01",
-		"domainName": "openstack_domain_name",
-		"flavor": "m1.tiny",
-		"identityEndpoint": "{{ .IdentityEndpointURL }}",
-		"image": "Standard_Ubuntu_18.04_latest",
-		"network": "public",
-		"nodeVolumeAttachLimit": null,
-		"region": "eu-de",
-		"instanceReadyCheckPeriod": "2m",
-		"instanceReadyCheckTimeout": "2m",
-		{{- if .ComputeAPIVersion }}
-		"computeAPIVersion": {{ .ComputeAPIVersion }},
-		{{- end }}
-		{{- if .RootDiskSizeGB }}
-		"rootDiskSizeGB": {{ .RootDiskSizeGB }},
-		{{- end }}
-		{{- if .RootDiskVolumeType }}
-		"rootDiskVolumeType": "{{ .RootDiskVolumeType }}",
-		{{- end }}
-		"securityGroups": [
-			"kubernetes-xyz"
-		],
-		"subnet": "subnetid",
-		"tags": {
-			"kubernetes-cluster": "xyz",
-			"system-cluster": "zyx",
-			"system-project": "xxx"
+	tmplStr := `{
+		"cloudProvider": "openstack",
+		"cloudProviderSpec": {
+			"availabilityZone": "eu-de-01",
+			"domainName": "openstack_domain_name",
+			"flavor": "m1.tiny",
+			"identityEndpoint": "{{ .IdentityEndpointURL }}",
+			"image": "Standard_Ubuntu_18.04_latest",
+			{{- if .Network }}
+			"network": "{{ .Network }}",
+			{{- end }}
+			{{- if .Subnet }}
+			"subnet": "{{ .Subnet }}",
+			{{- end }}
+			{{- if .Networks }}
+			"networks": [
+				{{- range $i, $e := .Networks }}
+				{{- if $i }},{{- end }}
+				"{{ $e }}"
+				{{- end }}
+			],
+			{{- end }}
+			"nodeVolumeAttachLimit": null,
+			"region": "eu-de",
+			"instanceReadyCheckPeriod": "2m",
+			"instanceReadyCheckTimeout": "2m",
+			{{- if .ComputeAPIVersion }}
+			"computeAPIVersion": "{{ .ComputeAPIVersion }}",
+			{{- end }}
+			{{- if .RootDiskSizeGB }}
+			"rootDiskSizeGB": {{ .RootDiskSizeGB }},
+			{{- end }}
+			{{- if .RootDiskVolumeType }}
+			"rootDiskVolumeType": "{{ .RootDiskVolumeType }}",
+			{{- end }}
+			"securityGroups": [
+				"kubernetes-xyz"
+			],
+			"tags": {
+				"kubernetes-cluster": "xyz",
+				"system-cluster": "zyx",
+				"system-project": "xxx"
+			},
+			{{- if .ApplicationCredentialID }}
+			"applicationCredentialID": "{{ .ApplicationCredentialID }}",
+			"applicationCredentialSecret": "{{ .ApplicationCredentialSecret }}",
+			{{- else }}
+				{{- if .ProjectID }}
+				"projectID": "{{ .ProjectID }}",
+				"projectName": "{{ .ProjectName }}",
+				{{- end }}
+				{{- if .TenantID }}
+				"tenantID": "{{ .TenantID }}",
+				"tenantName": "{{ .TenantName }}",
+				{{- end }}
+				"username": "dummy",
+				"password": "this_is_a_password",
+			{{- end }}
+			"tokenId": "",
+			"trustDevicePath": false
 		},
-		{{- if .ApplicationCredentialID }}
-		"applicationCredentialID": "{{ .ApplicationCredentialID }}",
-		"applicationCredentialSecret": "{{ .ApplicationCredentialSecret }}",
-		{{- else }}
-		{{ if .ProjectID }}
-		"projectID": "{{ .ProjectID }}",
-		"projectName": "{{ .ProjectName }}",
-        {{- end }}
-        {{- if .TenantID }}
-		"tenantID": "{{ .TenantID }}",
-		"tenantName": "{{ .TenantName }}",
-        {{- end }}
-		"username": "dummy",
-		"password": "this_is_a_password",
-		{{- end }}
-		"tokenId": "",
-		"trustDevicePath": false
-	},
-	"operatingSystem": "flatcar",
-	"operatingSystemSpec": {
-		"disableAutoUpdate": false,
-		"disableLocksmithD": true,
-		"disableUpdateEngine": false
-	}
-}`)
+		"operatingSystem": "flatcar",
+		"operatingSystemSpec": {
+			"disableAutoUpdate": false,
+			"disableLocksmithD": true,
+			"disableUpdateEngine": false
+		}
+	}`
+
+	tmpl, err := template.New("test").Parse(tmplStr)
 	if err != nil {
 		t.Fatalf("Error occurred while parsing openstack provider spec template: %v", err)
 	}
+
+	if o.Networks == nil && o.Network == "" {
+		o.Network = "public"
+	}
+
+	if o.Subnet == "" {
+		o.Subnet = "subnetid"
+	}
+
 	err = tmpl.Execute(&out, o)
 	if err != nil {
 		t.Fatalf("Error occurred while executing openstack provider spec template: %v", err)
@@ -240,13 +300,13 @@ func TestCreateServer(t *testing.T) {
 		},
 		{
 			name:          "Custom disk size",
-			specConf:      openstackProviderSpecConf{RootDiskSizeGB: pointer.Int32(10)},
+			specConf:      openstackProviderSpecConf{RootDiskSizeGB: ptr.To(int32(10))},
 			userdata:      "fake-userdata",
 			wantServerReq: expectedBlockDeviceBootRequest,
 		},
 		{
 			name:          "Custom disk type",
-			specConf:      openstackProviderSpecConf{RootDiskSizeGB: pointer.Int32(10), RootDiskVolumeType: "ssd"},
+			specConf:      openstackProviderSpecConf{RootDiskSizeGB: ptr.To(int32(10)), RootDiskVolumeType: "ssd"},
 			userdata:      "fake-userdata",
 			wantServerReq: expectedBlockDeviceBootVolumeTypeRequest,
 		},
@@ -262,6 +322,36 @@ func TestCreateServer(t *testing.T) {
 			userdata:      "fake-userdata",
 			wantServerReq: expectedServerRequest,
 		},
+		{
+			name:          "Backward compatibility with single network",
+			specConf:      openstackProviderSpecConf{Network: "public", Subnet: "subnetid"},
+			userdata:      "fake-userdata",
+			wantServerReq: expectedServerRequest,
+		},
+		{
+			name:          "Networks key used with single network",
+			specConf:      openstackProviderSpecConf{Networks: []string{"public"}},
+			userdata:      "fake-userdata",
+			wantServerReq: expectedServerRequest,
+		},
+		{
+			name:          "Duplicate networks provided",
+			specConf:      openstackProviderSpecConf{Networks: []string{"public", "public"}},
+			userdata:      "fake-userdata",
+			wantServerReq: expectedServerRequest,
+		},
+		{
+			name:          "Multiple networks provided",
+			specConf:      openstackProviderSpecConf{Networks: []string{"public", "private"}},
+			userdata:      "fake-userdata",
+			wantServerReq: expectedMultipleNetworksRequest,
+		},
+		{
+			name:          "Both network and networks specified (network becomes primary)",
+			specConf:      openstackProviderSpecConf{Network: "public", Networks: []string{"private"}},
+			userdata:      "fake-userdata",
+			wantServerReq: expectedMultipleNetworksRequest,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -270,18 +360,18 @@ func TestCreateServer(t *testing.T) {
 			ExpectServerCreated(t, tt.wantServerReq)
 			p := &provider{
 				// Note that configVarResolver is not used in this test as the getConfigFunc is mocked.
-				configVarResolver: providerconfig.NewConfigVarResolver(context.Background(), fakectrlruntimeclient.NewClientBuilder().Build()),
+				configVarResolver: configvar.NewResolver(context.Background(), fakectrlruntimeclient.NewClientBuilder().Build()),
 				// mock client config getter
-				clientGetter: func(c *Config) (*gophercloud.ProviderClient, error) {
+				clientGetter: func(*Config) (*gophercloud.ProviderClient, error) {
 					pc := client.ServiceClient()
 					// endpoint locator used to redirect to local test endpoint
-					pc.ProviderClient.EndpointLocator = func(_ gophercloud.EndpointOpts) (string, error) {
+					pc.EndpointLocator = func(_ gophercloud.EndpointOpts) (string, error) {
 						return pc.Endpoint, nil
 					}
 					return pc.ProviderClient, nil
 				},
 				// mock server readiness checker
-				portReadinessWaiter: func(*gophercloud.ServiceClient, string, string, time.Duration, time.Duration) error {
+				portReadinessWaiter: func(context.Context, *zap.SugaredLogger, *gophercloud.ServiceClient, string, string, time.Duration, time.Duration) error {
 					return nil
 				},
 			}
@@ -295,7 +385,7 @@ func TestCreateServer(t *testing.T) {
 			// It only verifies that the content of the create request matches
 			// the expectation
 			// TODO(irozzo) check the returned instance too
-			_, err := p.Create(context.Background(), m, tt.data, tt.userdata)
+			_, err := p.Create(context.Background(), zap.NewNop().Sugar(), m, tt.data, tt.userdata)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("provider.Create() or = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -334,11 +424,11 @@ func TestProjectAuthVarsAreCorrectlyLoaded(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			p := &provider{
 				// Note that configVarResolver is not used in this test as the getConfigFunc is mocked.
-				configVarResolver: providerconfig.NewConfigVarResolver(context.Background(), fakectrlruntimeclient.
+				configVarResolver: configvar.NewResolver(context.Background(), fakectrlruntimeclient.
 					NewClientBuilder().
 					Build()),
 			}
-			conf, _, _, _ := p.getConfig(v1alpha1.ProviderSpec{
+			conf, _, _, _ := p.getConfig(clusterv1alpha1.ProviderSpec{
 				Value: &runtime.RawExtension{
 					Raw: tt.specConf.rawProviderSpec(t),
 				},
@@ -349,6 +439,78 @@ func TestProjectAuthVarsAreCorrectlyLoaded(t *testing.T) {
 			}
 			if conf.ProjectName != tt.expectedName {
 				t.Errorf("ProjectName = %v, wanted %v", conf.ProjectName, tt.expectedName)
+			}
+		})
+	}
+}
+
+func TestResolveNetworks(t *testing.T) {
+	tests := []struct {
+		name     string
+		cfg      *Config
+		expected []string
+		wantErr  bool
+	}{
+		{
+			name:     "Only networks specified",
+			cfg:      &Config{Networks: []string{"public", "private"}},
+			expected: []string{"public", "private"},
+			wantErr:  false,
+		},
+		{
+			name:     "Only network specified (backward compatibility)",
+			cfg:      &Config{Network: "public"},
+			expected: []string{"public"},
+			wantErr:  false,
+		},
+		{
+			name:     "Both network and networks specified (network becomes primary)",
+			cfg:      &Config{Network: "public", Networks: []string{"private"}},
+			expected: []string{"public", "private"},
+			wantErr:  false,
+		},
+		{
+			name:     "Handle duplicated networks",
+			cfg:      &Config{Network: "public", Networks: []string{"public"}},
+			expected: []string{"public"},
+			wantErr:  false,
+		},
+		{
+			name:     "Neither specified",
+			cfg:      &Config{},
+			expected: nil,
+			wantErr:  true,
+		},
+		{
+			name:     "Empty networks array",
+			cfg:      &Config{Networks: []string{}},
+			expected: nil,
+			wantErr:  true,
+		},
+	}
+
+	p := &provider{}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := p.resolveNetworks(tt.cfg)
+
+			if (err != nil) != tt.wantErr {
+				t.Errorf("resolveNetworks() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+
+			if !tt.wantErr {
+				if len(result) != len(tt.expected) {
+					t.Errorf("result = %v, expected %v", result, tt.expected)
+					t.Errorf("resolveNetworks() result length = %v, expected length %v", len(result), len(tt.expected))
+					return
+				}
+
+				for i, network := range result {
+					if network != tt.expected[i] {
+						t.Errorf("resolveNetworks() result[%d] = %v, expected %v", i, network, tt.expected[i])
+					}
+				}
 			}
 		})
 	}
@@ -369,7 +531,7 @@ func ExpectServerCreated(t *testing.T, expectedServer string) {
 	// expectedServer copied into the response (e.g. name).
 	err := json.Unmarshal([]byte(expectedServer), &res)
 	if err != nil {
-		t.Fatalf("Error occurred while unmarshaling the expected server manifest.")
+		t.Fatalf("Error occurred while unmarshaling the expected server manifest: %v", err)
 	}
 	res.Server.ID = "1bea47ed-f6a9-463b-b423-14b9cca9ad27"
 	srvRes, err := json.Marshal(res)
@@ -532,6 +694,24 @@ func ExpectServerCreated(t *testing.T, expectedServer string) {
 						"provider:physical_network": null,
 						"provider:network_type": "local",
 						"router:external": true,
+						"port_security_enabled": true,
+						"dns_domain": "local.",
+						"mtu": 1500
+					},
+					{
+						"status": "ACTIVE",
+						"subnets": [
+							"55b45ada-e384-4130-a70b-17df1c3e1d3d"
+						],
+						"name": "private",
+						"admin_state_up": true,
+						"tenant_id": "4fd44f30292945e481c7b8a0c8908869",
+						"shared": false,
+						"id": "1df1458e-bd0c-423d-b201-2e5f56c94714",
+						"provider:segmentation_id": 9876543211,
+						"provider:physical_network": null,
+						"provider:network_type": "local",
+						"router:external": false,
 						"port_security_enabled": true,
 						"dns_domain": "local.",
 						"mtu": 1500

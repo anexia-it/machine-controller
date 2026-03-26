@@ -14,13 +14,11 @@
 
 presubmits:
   - name: pull-machine-controller-e2e-openstack
-    run_if_changed: "(pkg/cloudprovider/provider/openstack/|pkg/userdata)"
-    # We've made the E2E tests for OpenStack optional since in-tree cloud provider for OpenStack was removed with k8s v1.26. Since MC depends on the in-tree cloud provider
-    # the tests on k8s v1.26+ will fail.
-    # TODO: These tests shouldn't be marked as optional.
-    optional: true
+    # In-tree CCM is not supported for openstack starting from k8s 1.26. Please see https://github.com/kubermatic/machine-controller/issues/1626 for updates.
+    # run_if_changed: "(pkg/cloudprovider/provider/openstack/|pkg/userdata)"
     decorate: true
     clone_uri: "ssh://git@github.com/kubermatic/machine-controller.git"
+    path_alias: k8c.io/machine-controller
     labels:
       preset-openstack: "true"
       preset-hetzner: "true"
@@ -32,7 +30,7 @@ presubmits:
       preset-kubeconfig-ci: "true"
     spec:
       containers:
-        - image: quay.io/kubermatic/build:go-1.19-node-18-kind-0.17-5
+        - image: quay.io/kubermatic/build:go-1.25-node-22-kind-0.30-8
           command:
             - "./hack/ci/run-e2e-tests.sh"
           args:
@@ -50,9 +48,11 @@ presubmits:
               memory: 7Gi
 
   - name: pull-machine-controller-e2e-openstack-project-auth
-    run_if_changed: "(pkg/cloudprovider/provider/openstack/|pkg/userdata)"
+    # In-tree CCM is not supported for openstack starting from k8s 1.26. Please see https://github.com/kubermatic/machine-controller/issues/1626 for updates.
+    # run_if_changed: "(pkg/cloudprovider/provider/openstack/|pkg/userdata)"
     decorate: true
     clone_uri: "ssh://git@github.com/kubermatic/machine-controller.git"
+    path_alias: k8c.io/machine-controller
     labels:
       preset-openstack: "true"
       preset-hetzner: "true"
@@ -64,7 +64,7 @@ presubmits:
       preset-kubeconfig-ci: "true"
     spec:
       containers:
-        - image: quay.io/kubermatic/build:go-1.19-node-18-kind-0.17-5
+        - image: quay.io/kubermatic/build:go-1.25-node-22-kind-0.30-8
           command:
             - "./hack/ci/run-e2e-tests.sh"
           args:

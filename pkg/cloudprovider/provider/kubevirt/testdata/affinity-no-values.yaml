@@ -4,6 +4,8 @@ metadata:
   annotations:
   labels:
     cluster.x-k8s.io/cluster-name: cluster-name
+    kubermatic.k8c.io/cluster-id: "cluster-name"
+    kubermatic.k8c.io/project-id: ""
     cluster.x-k8s.io/role: worker
     kubevirt.io/vm: affinity-no-values
     md: md-name
@@ -15,9 +17,9 @@ spec:
         creationTimestamp: null
         name: affinity-no-values
       spec:
-        pvc:
+        storage:
           accessModes:
-            - ReadWriteOnce
+            - ReadWriteMany
           resources:
             requests:
               storage: 10Gi
@@ -25,12 +27,17 @@ spec:
         source:
           http:
             url: http://x.y.z.t/ubuntu.img
-  running: true
+  runStrategy: Once
   template:
     metadata:
+      annotations:
+        "kubevirt.io/allow-pod-bridge-network-live-migration": "true"
+        "ovn.kubernetes.io/allow_live_migration": "true"
       labels:
         cluster.x-k8s.io/cluster-name: cluster-name
         cluster.x-k8s.io/role: worker
+        kubermatic.k8c.io/cluster-id: "cluster-name"
+        kubermatic.k8c.io/project-id: ""
         kubevirt.io/vm: affinity-no-values
         md: md-name
     spec:
@@ -51,9 +58,9 @@ spec:
                 bus: virtio
               name: cloudinitdisk
           interfaces:
-            - macAddress: b6:f5:b4:fe:45:1d
-              name: default
+            - name: default
               bridge: {}
+          networkInterfaceMultiqueue: true
         resources:
           limits:
             cpu: "2"

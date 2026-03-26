@@ -4,6 +4,8 @@ metadata:
   annotations:
   labels:
     cluster.x-k8s.io/cluster-name: cluster-name
+    kubermatic.k8c.io/cluster-id: "cluster-name"
+    kubermatic.k8c.io/project-id: ""
     cluster.x-k8s.io/role: worker
     kubevirt.io/vm: secondary-disks
     md: md-name
@@ -14,9 +16,9 @@ spec:
     - metadata:
         name: secondary-disks
       spec:
-        pvc:
+        storage:
           accessModes:
-            - ReadWriteOnce
+            - ReadWriteMany
           resources:
             requests:
               storage: 10Gi
@@ -29,7 +31,7 @@ spec:
       spec:
         pvc:
           accessModes:
-            - ReadWriteOnce
+            - ReadWriteMany
           resources:
             requests:
               storage: 20Gi
@@ -42,7 +44,7 @@ spec:
       spec:
         pvc:
           accessModes:
-            - ReadWriteOnce
+            - ReadWriteMany
           resources:
             requests:
               storage: 30Gi
@@ -50,12 +52,17 @@ spec:
         source:
           http:
             url: http://x.y.z.t/ubuntu.img
-  running: true
+  runStrategy: Once
   template:
     metadata:
       creationTimestamp: null
+      annotations:
+        "kubevirt.io/allow-pod-bridge-network-live-migration": "true"
+        "ovn.kubernetes.io/allow_live_migration": "true"
       labels:
         cluster.x-k8s.io/cluster-name: cluster-name
+        kubermatic.k8c.io/cluster-id: "cluster-name"
+        kubermatic.k8c.io/project-id: ""
         cluster.x-k8s.io/role: worker
         kubevirt.io/vm: secondary-disks
         md: md-name
@@ -77,9 +84,9 @@ spec:
                 bus: virtio
               name: secondary-disks-secondarydisk1
           interfaces:
-            - macAddress: b6:f5:b4:fe:45:1d
-              name: default
+            - name: default
               bridge: {}
+          networkInterfaceMultiqueue: true
         resources:
           limits:
             cpu: "2"

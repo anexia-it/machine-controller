@@ -12,19 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-ARG GO_VERSION=1.19.4
+ARG GO_VERSION=1.25.7
 FROM docker.io/golang:${GO_VERSION} AS builder
-WORKDIR /go/src/github.com/kubermatic/machine-controller
+WORKDIR /go/src/k8c.io/machine-controller
 COPY . .
 RUN make all
 
-FROM alpine:3.16
+FROM alpine:3.23
 
 RUN apk add --no-cache ca-certificates cdrkit
 
 COPY --from=builder \
-    /go/src/github.com/kubermatic/machine-controller/machine-controller \
-    /go/src/github.com/kubermatic/machine-controller/machine-controller-userdata-* \
-    /go/src/github.com/kubermatic/machine-controller/webhook \
+    /go/src/k8c.io/machine-controller/machine-controller \
+    /go/src/k8c.io/machine-controller/webhook \
     /usr/local/bin/
 USER nobody

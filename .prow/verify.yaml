@@ -17,11 +17,12 @@ presubmits:
     always_run: true
     decorate: true
     clone_uri: "ssh://git@github.com/kubermatic/machine-controller.git"
+    path_alias: k8c.io/machine-controller
     labels:
       preset-goproxy: "true"
     spec:
       containers:
-        - image: golang:1.19.4
+        - image: quay.io/kubermatic/build:go-1.25-node-22-8
           command:
             - make
           args:
@@ -38,11 +39,12 @@ presubmits:
     always_run: true
     decorate: true
     clone_uri: "ssh://git@github.com/kubermatic/machine-controller.git"
+    path_alias: k8c.io/machine-controller
     labels:
       preset-goproxy: "true"
     spec:
       containers:
-        - image: golang:1.19.4
+        - image: quay.io/kubermatic/build:go-1.25-node-22-8
           command:
             - make
           args:
@@ -59,11 +61,12 @@ presubmits:
     always_run: true
     decorate: true
     clone_uri: "ssh://git@github.com/kubermatic/machine-controller.git"
+    path_alias: k8c.io/machine-controller
     labels:
       preset-goproxy: "true"
     spec:
       containers:
-        - image: golangci/golangci-lint:v1.50.1
+        - image: quay.io/kubermatic/build:go-1.25-node-22-8
           command:
             - make
           args:
@@ -79,15 +82,16 @@ presubmits:
     always_run: true
     decorate: true
     clone_uri: "ssh://git@github.com/kubermatic/machine-controller.git"
+    path_alias: k8c.io/machine-controller
     labels:
       preset-goproxy: "true"
     spec:
       containers:
-        - image: quay.io/kubermatic/yamllint:0.1
+        - image: quay.io/kubermatic/build:go-1.25-node-22-8
           command:
-            - "sh"
-            - "-c"
-            - "yamllint -c .yamllint.conf ."
+            - make
+          args:
+            - yamllint
           resources:
             requests:
               memory: 32Mi
@@ -100,11 +104,12 @@ presubmits:
     run_if_changed: "^hack/"
     decorate: true
     clone_uri: "ssh://git@github.com/kubermatic/machine-controller.git"
+    path_alias: k8c.io/machine-controller
     spec:
       containers:
-        - image: docker.io/mvdan/shfmt:v3.3.1
+        - image: quay.io/kubermatic/build:go-1.25-node-22-8
           command:
-            - "/bin/shfmt"
+            - "/usr/local/bin/shfmt"
           args:
             #   -l        list files whose formatting differs from shfmt's
             #   -d        error with a diff when the formatting differs
@@ -128,9 +133,10 @@ presubmits:
     always_run: true
     decorate: true
     clone_uri: "ssh://git@github.com/kubermatic/machine-controller.git"
+    path_alias: k8c.io/machine-controller
     spec:
       containers:
-        - image: quay.io/kubermatic-labs/boilerplate:v0.2.0
+        - image: quay.io/kubermatic/build:go-1.25-node-22-8
           command:
             - "./hack/verify-boilerplate.sh"
           resources:
@@ -145,27 +151,29 @@ presubmits:
     run_if_changed: "^go.(mod|sum)$"
     decorate: true
     clone_uri: "ssh://git@github.com/kubermatic/machine-controller.git"
+    path_alias: k8c.io/machine-controller
     labels:
       preset-goproxy: "true"
     spec:
       containers:
-        - image: quay.io/kubermatic/build:go-1.19-node-18-kind-0.17-5
+        - image: quay.io/kubermatic/build:go-1.25-node-22-8
           command:
             - ./hack/verify-licenses.sh
           resources:
             requests:
-              memory: 2Gi
-              cpu: 2
+              memory: 1Gi
+              cpu: 1
 
   - name: pull-machine-controller-test
     always_run: true
     decorate: true
     clone_uri: "ssh://git@github.com/kubermatic/machine-controller.git"
+    path_alias: k8c.io/machine-controller
     labels:
       preset-goproxy: "true"
     spec:
       containers:
-        - image: golang:1.19.4
+        - image: quay.io/kubermatic/build:go-1.25-node-22-8
           command:
             - make
           args:

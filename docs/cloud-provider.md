@@ -54,10 +54,10 @@ accessKeyId: "<< YOUR_ACCESS_KEY_ID >>"
 secretAccessKey: "<< YOUR_SECRET_ACCESS_KEY_ID >>"
 # region for the instance
 region: "eu-central-1"
-# avaiability zone for the instance
+# availability zone for the instance
 availabilityZone: "eu-central-1a"
 # vpc id for the instance
-vpcId: "vpc-819f62e9"
+vpcId: "vpc-079f7648481a11e77"
 # subnet id for the instance
 subnetId: "subnet-2bff4f43"
 # enable public IP assignment, default is true
@@ -80,8 +80,7 @@ ami: ""
 # When not set a 'kubernetes-v1' security group will get created
 securityGroupIDs:
 - ""
-# name of the instance profile to use.
-# When not set a 'kubernetes-v1' instance profile will get created
+# name of the instance profile to use, required.
 instanceProfile : ""
 
 # instance tags ("KubernetesCluster": "my-cluster" is a required tag.
@@ -136,6 +135,8 @@ network: ""
 computeAPIVersion: ""
 # set trust-device-path flag for kubelet
 trustDevicePath: false
+# set to true to store metadata on a configuration drive instead of the metadata service
+configDrive: false
 # set root disk size
 rootDiskSizeGB: 50
 # set root disk volume type
@@ -145,6 +146,46 @@ nodeVolumeAttachLimit: 20
 # the list of tags you would like to attach to the instance
 tags:
   tagKey: tagValue
+```
+
+## OpenNebula
+
+**Note:** This is a [community provider](../README.md#community-providers).
+
+### machine.spec.providerConfig.cloudProviderSpec
+
+```yaml
+# XML-RPC endpoint of your OpenNebula installation
+endpoint: ""
+# your OpenNebula username
+username: ""
+# your OpenNebula password
+password: ""
+
+# cpu (float64)
+cpu: 1
+# vcpu
+vcpu: 2
+# memory in MB
+memory: 1024
+
+# the name of the image to use, needs to be owned by the current user
+image: "Amazon Linux 2"
+# which datastore to use for the image
+datastore: ""
+# size of the disk in MB
+diskSize: 51200
+
+# network name, needs to be owned by the current user
+network: ""
+
+# whether to enable the VNC console
+enableVNC: true
+
+# optional key/value pairs to add to the VM template
+vmTemplateExtra:
+  # useful for e.g. setting the placement attributes as defined in https://docs.opennebula.io/6.4/management_and_operations/references/template.html#template-placement-section
+  SCHED_REQUIREMENTS: 'RACK="G4"'
 ```
 
 ## Google Cloud Platform
@@ -183,7 +224,7 @@ labels:
 ### machine.spec.providerConfig.cloudProviderSpec
 ```yaml
 token: "<< HETZNER_API_TOKEN >>"
-serverType: "cx11"
+serverType: "cx23"
 datacenter: ""
 location: "fsn1"
 # Optional: network IDs or names
@@ -195,6 +236,8 @@ labels:
 ```
 
 ## Linode
+
+**Note:** This is a [community provider](../README.md#community-providers).
 
 ### machine.spec.providerConfig.cloudProviderSpec
 ```yaml
@@ -323,6 +366,8 @@ memory: "2048M"
 Refer to the [VSphere](./vsphere.md#provider-configuration) specific documentation.
 
 ## Vultr
+
+**Note:** This is a [community provider](../README.md#community-providers).
 
 ### machine.spec.providerConfig.cloudProviderSpec
 ```yaml

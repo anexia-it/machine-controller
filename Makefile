@@ -14,13 +14,13 @@
 
 SHELL = /bin/bash -eu -o pipefail
 
-GO_VERSION ?= 1.19.4
+GO_VERSION ?= 1.25.7
 
 GOOS ?= $(shell go env GOOS)
 
 export CGO_ENABLED := 0
 
-export GIT_TAG ?= $(shell git tag --points-at HEAD)
+export GIT_TAG ?= $(shell git tag --points-at HEAD 'v*')
 
 export GOFLAGS?=-mod=readonly -trimpath
 
@@ -33,8 +33,7 @@ IMAGE_TAG = \
 		$(shell echo $$(git rev-parse HEAD && if [[ -n $$(git status --porcelain) ]]; then echo '-dirty'; fi)|tr -d ' ')
 IMAGE_NAME ?= $(REGISTRY)/$(REGISTRY_NAMESPACE)/machine-controller:$(IMAGE_TAG)
 
-OS = amzn2 centos ubuntu rhel flatcar rockylinux
-USERDATA_BIN = $(patsubst %, machine-controller-userdata-%, $(OS))
+OS = amzn2 ubuntu rhel flatcar rockylinux
 
 BASE64_ENC = \
 		$(shell if base64 -w0 <(echo "") &> /dev/null; then echo "base64 -w0"; else echo "base64 -b0"; fi)
@@ -43,29 +42,25 @@ BASE64_ENC = \
 all: build-machine-controller webhook
 
 .PHONY: build-machine-controller
-build-machine-controller: machine-controller $(USERDATA_BIN)
-
-machine-controller-userdata-%: cmd/userdata/% $(shell find cmd/userdata/$* pkg -name '*.go')
-	GOOS=$(GOOS) go build -v \
-		$(LDFLAGS) \
-		-o $@ \
-		github.com/kubermatic/machine-controller/cmd/userdata/$*
+build-machine-controller: machine-controller
 
 %: cmd/% $(shell find cmd/$* pkg -name '*.go')
 	GOOS=$(GOOS) go build -v \
 		$(LDFLAGS) \
 		-o $@ \
-		github.com/kubermatic/machine-controller/cmd/$*
+		k8c.io/machine-controller/cmd/$*
 
 .PHONY: clean
-clean: clean-certs
-	rm -f machine-controller \
-		webhook \
-		$(USERDATA_BIN)
+clean:
+	rm -f machine-controller webhook
 
 .PHONY: lint
 lint:
 	golangci-lint run -v
+	make -C sdk lint
+
+yamllint:
+	yamllint -c .yamllint.conf .
 
 .PHONY: docker-image
 docker-image:
@@ -86,64 +81,28 @@ docker-image-publish: docker-image
 .PHONY: test-unit-docker
 test-unit-docker:
 	@docker run --rm \
-		-v $$PWD:/go/src/github.com/kubermatic/machine-controller \
+		-v $$PWD:/go/src/k8c.io/machine-controller \
 		-v $$PWD/.buildcache:/cache \
 		-e GOCACHE=/cache \
-		-w /go/src/github.com/kubermatic/machine-controller \
+		-w /go/src/k8c.io/machine-controller \
 		golang:$(GO_VERSION) \
 			make test-unit "GOFLAGS=$(GOFLAGS)"
 
 .PHONY: test-unit
 test-unit:
 	go test -v ./...
+	cd sdk && go test -v ./...
 
 .PHONY: build-tests
 build-tests:
 	go test -run nope ./...
+	cd sdk && go test -run nope ./...
 	go test -tags e2e -run nope ./...
-
-examples/ca-key.pem:
-	openssl genrsa -out examples/ca-key.pem 4096
-
-examples/ca-cert.pem: examples/ca-key.pem
-	openssl req -x509 -new -nodes -key examples/ca-key.pem \
-    -subj "/C=US/ST=CA/O=Acme/CN=k8s-machine-controller-ca" \
-		-sha256 -days 10000 -out examples/ca-cert.pem
-
-examples/admission-key.pem: examples/ca-cert.pem
-	openssl genrsa -out examples/admission-key.pem 2048
-	chmod 0600 examples/admission-key.pem
-
-examples/admission-cert.pem: examples/admission-key.pem
-	openssl req -new -sha256 \
-		-key examples/admission-key.pem \
-		-config examples/webhook-certificate.cnf -extensions v3_req \
-		-out examples/admission.csr
-	openssl x509 -req \
-		-sha256 \
-		-days 10000 \
-		-extensions v3_req \
-		-extfile examples/webhook-certificate.cnf \
-		-in examples/admission.csr \
-		-CA examples/ca-cert.pem \
-		-CAkey examples/ca-key.pem \
-		-CAcreateserial \
-		-out examples/admission-cert.pem
-
-clean-certs:
-	cd examples/ && rm -f admission.csr admission-cert.pem admission-key.pem ca-cert.pem ca-key.pem
-
-.PHONY: deploy
-deploy: examples/admission-cert.pem
-	@cat examples/machine-controller.yaml \
-		|sed "s/__admission_ca_cert__/$(shell cat examples/ca-cert.pem|$(BASE64_ENC))/g" \
-		|sed "s/__admission_cert__/$(shell cat examples/admission-cert.pem|$(BASE64_ENC))/g" \
-		|sed "s/__admission_key__/$(shell cat examples/admission-key.pem|$(BASE64_ENC))/g" \
-		|kubectl apply -f -
 
 .PHONY: check-dependencies
 check-dependencies:
 	go mod verify
+	cd sdk && go mod verify
 
 .PHONY: download-gocache
 download-gocache:

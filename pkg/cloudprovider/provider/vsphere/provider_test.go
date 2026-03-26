@@ -25,11 +25,12 @@ import (
 	"text/template"
 
 	"github.com/vmware/govmomi/simulator"
+	"go.uber.org/zap"
 
-	cloudprovidertesting "github.com/kubermatic/machine-controller/pkg/cloudprovider/testing"
-	"github.com/kubermatic/machine-controller/pkg/providerconfig"
+	cloudprovidertesting "k8c.io/machine-controller/pkg/cloudprovider/testing"
+	"k8c.io/machine-controller/sdk/providerconfig/configvar"
 
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 	fakectrlruntimeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -47,6 +48,8 @@ func (v vsphereProviderSpecConf) rawProviderSpec(t *testing.T) []byte {
 	"cloudProvider": "vsphere",
 	"cloudProviderSpec": {
 		"allowInsecure": false,
+		"vmAntiAffinity": true,
+        "cluster": "DC0_C0",
 		"cpus": 1,
 		"datacenter": "DC0",
 		{{- if .Datastore }}
@@ -61,7 +64,9 @@ func (v vsphereProviderSpecConf) rawProviderSpec(t *testing.T) []byte {
 		"password": "{{ .Password }}",
 		"templateVMName": "DC0_H0_VM0",
 		"username": "{{ .User }}",
-		"vmNetName": "",
+		"networks": [
+			""
+		],
 		"vsphereURL": "{{ .URL }}"
 	},
 	"operatingSystem": "flatcar",
@@ -92,7 +97,7 @@ func TestValidate(t *testing.T) {
 		{
 			name: "Valid Datastore",
 			args: vsphereProviderSpecConf{
-				Datastore: pointer.String("LocalDS_0"),
+				Datastore: ptr.To("LocalDS_0"),
 			},
 			getConfigErr: nil,
 			wantErr:      false,
@@ -100,8 +105,8 @@ func TestValidate(t *testing.T) {
 		{
 			name: "Valid Datastore end empty DatastoreCluster",
 			args: vsphereProviderSpecConf{
-				Datastore:        pointer.String("LocalDS_0"),
-				DatastoreCluster: pointer.String(""),
+				Datastore:        ptr.To("LocalDS_0"),
+				DatastoreCluster: ptr.To(""),
 			},
 			getConfigErr: nil,
 			wantErr:      false,
@@ -109,7 +114,7 @@ func TestValidate(t *testing.T) {
 		{
 			name: "Valid DatastoreCluster",
 			args: vsphereProviderSpecConf{
-				DatastoreCluster: pointer.String("DC0_POD0"),
+				DatastoreCluster: ptr.To("DC0_POD0"),
 			},
 			getConfigErr: nil,
 			wantErr:      false,
@@ -117,7 +122,7 @@ func TestValidate(t *testing.T) {
 		{
 			name: "Invalid Datastore",
 			args: vsphereProviderSpecConf{
-				Datastore: pointer.String("LocalDS_10"),
+				Datastore: ptr.To("LocalDS_10"),
 			},
 			getConfigErr: nil,
 			wantErr:      true,
@@ -125,7 +130,7 @@ func TestValidate(t *testing.T) {
 		{
 			name: "Invalid DatastoreCluster",
 			args: vsphereProviderSpecConf{
-				Datastore: pointer.String("DC0_POD10"),
+				Datastore: ptr.To("DC0_POD10"),
 			},
 			getConfigErr: nil,
 			wantErr:      true,
@@ -133,8 +138,8 @@ func TestValidate(t *testing.T) {
 		{
 			name: "Both Datastore and DatastoreCluster specified",
 			args: vsphereProviderSpecConf{
-				Datastore:        pointer.String("DC0_POD10"),
-				DatastoreCluster: pointer.String("DC0_POD0"),
+				Datastore:        ptr.To("DC0_POD10"),
+				DatastoreCluster: ptr.To("DC0_POD0"),
 			},
 			getConfigErr: nil,
 			wantErr:      true,
@@ -169,7 +174,7 @@ func TestValidate(t *testing.T) {
 			password, _ := simulator.DefaultLogin.Password()
 			p := &provider{
 				// Note that configVarResolver is not used in this test as the getConfigFunc is mocked.
-				configVarResolver: providerconfig.NewConfigVarResolver(context.Background(), fakectrlruntimeclient.
+				configVarResolver: configvar.NewResolver(context.Background(), fakectrlruntimeclient.
 					NewClientBuilder().
 					Build()),
 			}
@@ -178,7 +183,7 @@ func TestValidate(t *testing.T) {
 			tt.args.URL = vSphereURL
 			m := cloudprovidertesting.Creator{Name: "test", Namespace: "vsphere", ProviderSpecGetter: tt.args.rawProviderSpec}.
 				CreateMachine(t)
-			if err := p.Validate(context.Background(), m.Spec); (err != nil) != tt.wantErr {
+			if err := p.Validate(context.Background(), zap.NewNop().Sugar(), m.Spec); (err != nil) != tt.wantErr {
 				t.Errorf("provider.Validate() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})

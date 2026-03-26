@@ -29,29 +29,29 @@ import (
 	"time"
 
 	"github.com/linode/linodego"
+	"go.uber.org/zap"
 	"golang.org/x/oauth2"
 
-	common "github.com/kubermatic/machine-controller/pkg/apis/cluster/common"
-	clusterv1alpha1 "github.com/kubermatic/machine-controller/pkg/apis/cluster/v1alpha1"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/common/ssh"
-	cloudprovidererrors "github.com/kubermatic/machine-controller/pkg/cloudprovider/errors"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/instance"
-	linodetypes "github.com/kubermatic/machine-controller/pkg/cloudprovider/provider/linode/types"
-	cloudprovidertypes "github.com/kubermatic/machine-controller/pkg/cloudprovider/types"
-	"github.com/kubermatic/machine-controller/pkg/providerconfig"
-	providerconfigtypes "github.com/kubermatic/machine-controller/pkg/providerconfig/types"
+	"k8c.io/machine-controller/pkg/cloudprovider/common/ssh"
+	cloudprovidererrors "k8c.io/machine-controller/pkg/cloudprovider/errors"
+	"k8c.io/machine-controller/pkg/cloudprovider/instance"
+	cloudprovidertypes "k8c.io/machine-controller/pkg/cloudprovider/types"
+	common "k8c.io/machine-controller/sdk/apis/cluster/common"
+	clusterv1alpha1 "k8c.io/machine-controller/sdk/apis/cluster/v1alpha1"
+	linodetypes "k8c.io/machine-controller/sdk/cloudprovider/linode"
+	"k8c.io/machine-controller/sdk/providerconfig"
 
-	v1 "k8s.io/api/core/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 )
 
 type provider struct {
-	configVarResolver *providerconfig.ConfigVarResolver
+	configVarResolver providerconfig.ConfigVarResolver
 }
 
 // New returns a linode provider.
-func New(configVarResolver *providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
+func New(configVarResolver providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
 	return &provider{configVarResolver: configVarResolver}
 }
 
@@ -80,18 +80,12 @@ func (t *TokenSource) Token() (*oauth2.Token, error) {
 	return token, nil
 }
 
-func getSlugForOS(os providerconfigtypes.OperatingSystem) (string, error) {
+func getSlugForOS(os providerconfig.OperatingSystem) (string, error) {
 	switch os {
-	case providerconfigtypes.OperatingSystemUbuntu:
+	case providerconfig.OperatingSystemUbuntu:
 		return "linode/ubuntu18.04", nil
-
-		/**
-		// StackScript for CloudInit is not centos7 ready
-		case providerconfigtypes.OperatingSystemCentOS:
-			return "linode/centos7", nil
-		**/
 	}
-	return "", providerconfigtypes.ErrOSNotSupported
+	return "", providerconfig.ErrOSNotSupported
 }
 
 func getClient(ctx context.Context, token string) linodego.Client {
@@ -107,12 +101,8 @@ func getClient(ctx context.Context, token string) linodego.Client {
 	return client
 }
 
-func (p *provider) getConfig(provSpec clusterv1alpha1.ProviderSpec) (*Config, *providerconfigtypes.Config, error) {
-	if provSpec.Value == nil {
-		return nil, nil, fmt.Errorf("machine.spec.providerconfig.value is nil")
-	}
-
-	pconfig, err := providerconfigtypes.GetConfig(provSpec)
+func (p *provider) getConfig(provSpec clusterv1alpha1.ProviderSpec) (*Config, *providerconfig.Config, error) {
+	pconfig, err := providerconfig.GetConfig(provSpec)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -127,29 +117,29 @@ func (p *provider) getConfig(provSpec clusterv1alpha1.ProviderSpec) (*Config, *p
 	}
 
 	c := Config{}
-	c.Token, err = p.configVarResolver.GetConfigVarStringValueOrEnv(rawConfig.Token, "LINODE_TOKEN")
+	c.Token, err = p.configVarResolver.GetStringValueOrEnv(rawConfig.Token, "LINODE_TOKEN")
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get the value of \"token\" field, error = %w", err)
 	}
-	c.Region, err = p.configVarResolver.GetConfigVarStringValue(rawConfig.Region)
+	c.Region, err = p.configVarResolver.GetStringValue(rawConfig.Region)
 	if err != nil {
 		return nil, nil, err
 	}
-	c.Type, err = p.configVarResolver.GetConfigVarStringValue(rawConfig.Type)
+	c.Type, err = p.configVarResolver.GetStringValue(rawConfig.Type)
 	if err != nil {
 		return nil, nil, err
 	}
-	c.Backups, _, err = p.configVarResolver.GetConfigVarBoolValue(rawConfig.Backups)
+	c.Backups, _, err = p.configVarResolver.GetBoolValue(rawConfig.Backups)
 	if err != nil {
 		return nil, nil, err
 	}
-	c.PrivateNetworking, _, err = p.configVarResolver.GetConfigVarBoolValue(rawConfig.PrivateNetworking)
+	c.PrivateNetworking, _, err = p.configVarResolver.GetBoolValue(rawConfig.PrivateNetworking)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	for _, tag := range rawConfig.Tags {
-		tagVal, err := p.configVarResolver.GetConfigVarStringValue(tag)
+		tagVal, err := p.configVarResolver.GetStringValue(tag)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -159,11 +149,11 @@ func (p *provider) getConfig(provSpec clusterv1alpha1.ProviderSpec) (*Config, *p
 	return &c, pconfig, err
 }
 
-func (p *provider) AddDefaults(spec clusterv1alpha1.MachineSpec) (clusterv1alpha1.MachineSpec, error) {
+func (p *provider) AddDefaults(_ *zap.SugaredLogger, spec clusterv1alpha1.MachineSpec) (clusterv1alpha1.MachineSpec, error) {
 	return spec, nil
 }
 
-func (p *provider) Validate(ctx context.Context, spec clusterv1alpha1.MachineSpec) error {
+func (p *provider) Validate(ctx context.Context, _ *zap.SugaredLogger, spec clusterv1alpha1.MachineSpec) error {
 	c, pc, err := p.getConfig(spec.ProviderSpec)
 	if err != nil {
 		return fmt.Errorf("failed to parse config: %w", err)
@@ -205,13 +195,13 @@ func createRandomPassword() (string, error) {
 	rawRootPass := make([]byte, 50)
 	_, err := rand.Read(rawRootPass)
 	if err != nil {
-		return "", fmt.Errorf("Failed to generate random password")
+		return "", fmt.Errorf("failed to generate random password: %w", err)
 	}
 	rootPass := base64.StdEncoding.EncodeToString(rawRootPass)
 	return rootPass, nil
 }
 
-func (p *provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData, userdata string) (instance.Instance, error) {
+func (p *provider) Create(ctx context.Context, _ *zap.SugaredLogger, machine *clusterv1alpha1.Machine, _ *cloudprovidertypes.ProviderData, userdata string) (instance.Instance, error) {
 	c, pc, err := p.getConfig(machine.Spec.ProviderSpec)
 	if err != nil {
 		return nil, cloudprovidererrors.TerminalError{
@@ -272,8 +262,8 @@ func (p *provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine,
 	return &linodeInstance{linode: linode}, err
 }
 
-func (p *provider) Cleanup(ctx context.Context, machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData) (bool, error) {
-	instance, err := p.Get(ctx, machine, data)
+func (p *provider) Cleanup(ctx context.Context, log *zap.SugaredLogger, machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData) (bool, error) {
+	instance, err := p.Get(ctx, log, machine, data)
 	if err != nil {
 		if errors.Is(err, cloudprovidererrors.ErrInstanceNotFound) {
 			return true, nil
@@ -312,7 +302,7 @@ func getListOptions(name string) *linodego.ListOptions {
 	return listOptions
 }
 
-func (p *provider) Get(ctx context.Context, machine *clusterv1alpha1.Machine, _ *cloudprovidertypes.ProviderData) (instance.Instance, error) {
+func (p *provider) Get(ctx context.Context, _ *zap.SugaredLogger, machine *clusterv1alpha1.Machine, _ *cloudprovidertypes.ProviderData) (instance.Instance, error) {
 	c, _, err := p.getConfig(machine.Spec.ProviderSpec)
 	if err != nil {
 		return nil, cloudprovidererrors.TerminalError{
@@ -339,7 +329,7 @@ func (p *provider) Get(ctx context.Context, machine *clusterv1alpha1.Machine, _ 
 	return nil, cloudprovidererrors.ErrInstanceNotFound
 }
 
-func (p *provider) MigrateUID(ctx context.Context, machine *clusterv1alpha1.Machine, newUID types.UID) error {
+func (p *provider) MigrateUID(ctx context.Context, _ *zap.SugaredLogger, machine *clusterv1alpha1.Machine, newUID types.UID) error {
 	c, _, err := p.getConfig(machine.Spec.ProviderSpec)
 	if err != nil {
 		return fmt.Errorf("failed to decode providerconfig: %w", err)
@@ -375,10 +365,6 @@ func (p *provider) MigrateUID(ctx context.Context, machine *clusterv1alpha1.Mach
 	return nil
 }
 
-func (p *provider) GetCloudConfig(spec clusterv1alpha1.MachineSpec) (config string, name string, err error) {
-	return "", "", nil
-}
-
 func (p *provider) MachineMetricsLabels(machine *clusterv1alpha1.Machine) (map[string]string, error) {
 	labels := make(map[string]string)
 
@@ -404,15 +390,18 @@ func (d *linodeInstance) ID() string {
 }
 
 func (d *linodeInstance) ProviderID() string {
+	if d == nil || d.ID() == "" {
+		return ""
+	}
 	return fmt.Sprintf("linode://%s", d.ID())
 }
 
-func (d *linodeInstance) Addresses() map[string]v1.NodeAddressType {
-	addresses := map[string]v1.NodeAddressType{}
+func (d *linodeInstance) Addresses() map[string]corev1.NodeAddressType {
+	addresses := map[string]corev1.NodeAddressType{}
 	for _, n := range d.linode.IPv4 {
-		addresses[n.String()] = v1.NodeInternalIP
+		addresses[n.String()] = corev1.NodeInternalIP
 	}
-	addresses[d.linode.IPv6] = v1.NodeInternalIP
+	addresses[d.linode.IPv6] = corev1.NodeInternalIP
 	return addresses
 }
 
@@ -456,6 +445,6 @@ func linodeStatusAndErrToTerminalError(err error) error {
 	}
 }
 
-func (p *provider) SetMetricsForMachines(machines clusterv1alpha1.MachineList) error {
+func (p *provider) SetMetricsForMachines(_ clusterv1alpha1.MachineList) error {
 	return nil
 }

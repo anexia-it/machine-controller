@@ -22,21 +22,23 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/kubermatic/machine-controller/pkg/apis/cluster/common"
-	clusterv1alpha1 "github.com/kubermatic/machine-controller/pkg/apis/cluster/v1alpha1"
-	cloudprovidererrors "github.com/kubermatic/machine-controller/pkg/cloudprovider/errors"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/instance"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/provider/baremetal/plugins"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/provider/baremetal/plugins/tinkerbell"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/provider/baremetal/plugins/tinkerbell/metadata"
-	baremetaltypes "github.com/kubermatic/machine-controller/pkg/cloudprovider/provider/baremetal/types"
-	cloudprovidertypes "github.com/kubermatic/machine-controller/pkg/cloudprovider/types"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/util"
-	"github.com/kubermatic/machine-controller/pkg/providerconfig"
-	providerconfigtypes "github.com/kubermatic/machine-controller/pkg/providerconfig/types"
+	"go.uber.org/zap"
+
+	cloudprovidererrors "k8c.io/machine-controller/pkg/cloudprovider/errors"
+	"k8c.io/machine-controller/pkg/cloudprovider/instance"
+	"k8c.io/machine-controller/pkg/cloudprovider/provider/baremetal/plugins"
+	tink "k8c.io/machine-controller/pkg/cloudprovider/provider/baremetal/plugins/tinkerbell"
+	cloudprovidertypes "k8c.io/machine-controller/pkg/cloudprovider/types"
+	"k8c.io/machine-controller/pkg/cloudprovider/util"
+	"k8c.io/machine-controller/sdk/apis/cluster/common"
+	clusterv1alpha1 "k8c.io/machine-controller/sdk/apis/cluster/v1alpha1"
+	baremetaltypes "k8c.io/machine-controller/sdk/cloudprovider/baremetal"
+	plugintypes "k8c.io/machine-controller/sdk/cloudprovider/baremetal/plugins"
+	tinktypes "k8c.io/machine-controller/sdk/cloudprovider/baremetal/plugins/tinkerbell"
+	"k8c.io/machine-controller/sdk/providerconfig"
 
 	corev1 "k8s.io/api/core/v1"
-	kerrors "k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -69,11 +71,11 @@ func (b bareMetalServer) Status() instance.Status {
 }
 
 type provider struct {
-	configVarResolver *providerconfig.ConfigVarResolver
+	configVarResolver providerconfig.ConfigVarResolver
 }
 
 // New returns a new BareMetal provider.
-func New(configVarResolver *providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
+func New(configVarResolver providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
 	return &provider{
 		configVarResolver: configVarResolver,
 	}
@@ -81,16 +83,16 @@ func New(configVarResolver *providerconfig.ConfigVarResolver) cloudprovidertypes
 
 type Config struct {
 	driver     plugins.PluginDriver
-	driverName plugins.Driver
+	driverName plugintypes.Driver
 	driverSpec runtime.RawExtension
 }
 
-func (p *provider) getConfig(provSpec clusterv1alpha1.ProviderSpec) (*Config, *providerconfigtypes.Config, error) {
+func (p *provider) getConfig(provSpec clusterv1alpha1.ProviderSpec) (*Config, *providerconfig.Config, error) {
 	if provSpec.Value == nil {
 		return nil, nil, fmt.Errorf("machine.spec.providerconfig.value is nil")
 	}
 
-	pconfig, err := providerconfigtypes.GetConfig(provSpec)
+	pconfig, err := providerconfig.GetConfig(provSpec)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -105,57 +107,30 @@ func (p *provider) getConfig(provSpec clusterv1alpha1.ProviderSpec) (*Config, *p
 	}
 
 	c := Config{}
-	endpoint, err := p.configVarResolver.GetConfigVarStringValueOrEnv(rawConfig.MetadataClient.Endpoint, "METADATA_SERVER_ENDPOINT")
-	if err != nil {
-		return nil, nil, fmt.Errorf(`failed to get value of \"endpoint\" field: %w`, err)
-	}
-	authMethod, err := p.configVarResolver.GetConfigVarStringValueOrEnv(rawConfig.MetadataClient.AuthMethod, "METADATA_SERVER_AUTH_METHOD")
-	if err != nil {
-		return nil, nil, fmt.Errorf(`failed to get value of \"authMethod\" field: %w`, err)
-	}
-	username, err := p.configVarResolver.GetConfigVarStringValueOrEnv(rawConfig.MetadataClient.Username, "METADATA_SERVER_USERNAME")
-	if err != nil {
-		return nil, nil, fmt.Errorf(`failed to get value of \"username\" field: %w`, err)
-	}
-	password, err := p.configVarResolver.GetConfigVarStringValueOrEnv(rawConfig.MetadataClient.Password, "METADATA_SERVER_PASSWORD")
-	if err != nil {
-		return nil, nil, fmt.Errorf(`failed to get value of \"password\" field: %w`, err)
-	}
-	token, err := p.configVarResolver.GetConfigVarStringValueOrEnv(rawConfig.MetadataClient.Token, "METADATA_SERVER_TOKEN")
-	if err != nil {
-		return nil, nil, fmt.Errorf(`failed to get value of \"token\" field: %w`, err)
-	}
 
-	mdCfg := &metadata.Config{
-		Endpoint: endpoint,
-		AuthConfig: &metadata.AuthConfig{
-			AuthMethod: metadata.AuthMethod(authMethod),
-			Username:   username,
-			Password:   password,
-			Token:      token,
-		},
-	}
-
-	driverName, err := p.configVarResolver.GetConfigVarStringValue(rawConfig.Driver)
+	driverName, err := p.configVarResolver.GetStringValue(rawConfig.Driver)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get baremetal provider's driver name: %w", err)
 	}
-	c.driverName = plugins.Driver(driverName)
+	c.driverName = plugintypes.Driver(driverName)
 
 	c.driverSpec = rawConfig.DriverSpec
 
 	switch c.driverName {
-	case plugins.Tinkerbell:
-		driverConfig := struct {
-			ProvisionerIPAddress string `json:"provisionerIPAddress"`
-			MirrorHost           string `json:"mirrorHost"`
-		}{}
+	case plugintypes.Tinkerbell:
+		driverConfig := &tinktypes.TinkerbellPluginSpec{}
 
 		if err := json.Unmarshal(c.driverSpec.Raw, &driverConfig); err != nil {
 			return nil, nil, fmt.Errorf("failed to unmarshal tinkerbell driver spec: %w", err)
 		}
 
-		c.driver, err = tinkerbell.NewTinkerbellDriver(mdCfg, nil, driverConfig.ProvisionerIPAddress, driverConfig.MirrorHost)
+		tinkConfig, err := tink.GetConfig(*driverConfig, p.configVarResolver.GetStringValueOrEnv)
+
+		if err != nil {
+			return nil, nil, err
+		}
+
+		c.driver, err = tink.NewTinkerbellDriver(*tinkConfig, driverConfig)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to create a tinkerbell driver: %w", err)
 		}
@@ -166,12 +141,12 @@ func (p *provider) getConfig(provSpec clusterv1alpha1.ProviderSpec) (*Config, *p
 	return &c, pconfig, err
 }
 
-func (p provider) AddDefaults(spec clusterv1alpha1.MachineSpec) (clusterv1alpha1.MachineSpec, error) {
+func (p provider) AddDefaults(_ *zap.SugaredLogger, spec clusterv1alpha1.MachineSpec) (clusterv1alpha1.MachineSpec, error) {
 	_, _, err := p.getConfig(spec.ProviderSpec)
 	return spec, err
 }
 
-func (p provider) Validate(_ context.Context, spec clusterv1alpha1.MachineSpec) error {
+func (p provider) Validate(_ context.Context, _ *zap.SugaredLogger, spec clusterv1alpha1.MachineSpec) error {
 	c, _, err := p.getConfig(spec.ProviderSpec)
 	if err != nil {
 		return fmt.Errorf("failed to parse config: %w", err)
@@ -188,7 +163,7 @@ func (p provider) Validate(_ context.Context, spec clusterv1alpha1.MachineSpec) 
 	return nil
 }
 
-func (p provider) Get(ctx context.Context, machine *clusterv1alpha1.Machine, _ *cloudprovidertypes.ProviderData) (instance.Instance, error) {
+func (p provider) Get(ctx context.Context, _ *zap.SugaredLogger, machine *clusterv1alpha1.Machine, _ *cloudprovidertypes.ProviderData) (instance.Instance, error) {
 	c, _, err := p.getConfig(machine.Spec.ProviderSpec)
 	if err != nil {
 		return nil, cloudprovidererrors.TerminalError{
@@ -197,7 +172,7 @@ func (p provider) Get(ctx context.Context, machine *clusterv1alpha1.Machine, _ *
 		}
 	}
 
-	server, err := c.driver.GetServer(ctx, machine.UID, c.driverSpec)
+	server, err := c.driver.GetServer(ctx)
 	if err != nil {
 		if errors.Is(err, cloudprovidererrors.ErrInstanceNotFound) {
 			return nil, cloudprovidererrors.ErrInstanceNotFound
@@ -215,7 +190,7 @@ func (p provider) GetCloudConfig(_ clusterv1alpha1.MachineSpec) (config string, 
 	return "", "", nil
 }
 
-func (p provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData, userdata string) (instance.Instance, error) {
+func (p provider) Create(ctx context.Context, log *zap.SugaredLogger, machine *clusterv1alpha1.Machine, _ *cloudprovidertypes.ProviderData, userdata string) (instance.Instance, error) {
 	c, _, err := p.getConfig(machine.Spec.ProviderSpec)
 	if err != nil {
 		return nil, cloudprovidererrors.TerminalError{
@@ -224,23 +199,7 @@ func (p provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine, 
 		}
 	}
 
-	if err := util.CreateMachineCloudInitSecret(ctx, userdata, machine.Name, data.Client); err != nil {
-		return nil, fmt.Errorf("failed to create cloud-init secret for machine %s: %w", machine.Name, err)
-	}
-
-	token, apiServer, err := util.ExtractTokenAndAPIServer(ctx, userdata, data.Client)
-	if err != nil {
-		return nil, fmt.Errorf("failed to extarct token and api server address: %w", err)
-	}
-
-	cfg := &plugins.CloudConfigSettings{
-		Token:       token,
-		Namespace:   util.CloudInitNamespace,
-		SecretName:  machine.Name,
-		ClusterHost: apiServer,
-	}
-
-	server, err := c.driver.ProvisionServer(ctx, machine.UID, cfg, c.driverSpec)
+	server, err := c.driver.ProvisionServer(ctx, log, machine.ObjectMeta, c.driverSpec, userdata)
 	if err != nil {
 		return nil, fmt.Errorf("failed to provision server: %w", err)
 	}
@@ -250,7 +209,7 @@ func (p provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine, 
 	}, nil
 }
 
-func (p provider) Cleanup(ctx context.Context, machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData) (bool, error) {
+func (p provider) Cleanup(ctx context.Context, _ *zap.SugaredLogger, machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData) (bool, error) {
 	c, _, err := p.getConfig(machine.Spec.ProviderSpec)
 	if err != nil {
 		return false, cloudprovidererrors.TerminalError{
@@ -259,13 +218,13 @@ func (p provider) Cleanup(ctx context.Context, machine *clusterv1alpha1.Machine,
 		}
 	}
 
-	if err := c.driver.DeprovisionServer(ctx, machine.UID); err != nil {
+	if err := c.driver.DeprovisionServer(ctx); err != nil {
 		return false, fmt.Errorf("failed to de-provision server: %w", err)
 	}
 
 	secret := &corev1.Secret{}
 	if err := data.Client.Get(ctx, types.NamespacedName{Namespace: util.CloudInitNamespace, Name: machine.Name}, secret); err != nil {
-		if !kerrors.IsNotFound(err) {
+		if !apierrors.IsNotFound(err) {
 			return false, fmt.Errorf("failed to fetching secret for userdata: %w", err)
 		}
 
@@ -283,7 +242,7 @@ func (p provider) MachineMetricsLabels(_ *clusterv1alpha1.Machine) (map[string]s
 	return nil, nil
 }
 
-func (p provider) MigrateUID(_ context.Context, _ *clusterv1alpha1.Machine, _ types.UID) error {
+func (p provider) MigrateUID(_ context.Context, _ *zap.SugaredLogger, _ *clusterv1alpha1.Machine, _ types.UID) error {
 	return nil
 }
 

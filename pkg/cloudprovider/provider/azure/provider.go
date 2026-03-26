@@ -19,6 +19,7 @@ package azure
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -27,27 +28,26 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2021-11-01/compute"
-	"github.com/Azure/azure-sdk-for-go/services/network/mgmt/2021-05-01/network"
+	"github.com/Azure/azure-sdk-for-go/profiles/latest/compute/mgmt/compute"
+	"github.com/Azure/azure-sdk-for-go/profiles/latest/network/mgmt/network"
 	"github.com/Azure/go-autorest/autorest/to"
 	gocache "github.com/patrickmn/go-cache"
+	"go.uber.org/zap"
 
-	"github.com/kubermatic/machine-controller/pkg/apis/cluster/common"
-	clusterv1alpha1 "github.com/kubermatic/machine-controller/pkg/apis/cluster/v1alpha1"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/common/ssh"
-	cloudprovidererrors "github.com/kubermatic/machine-controller/pkg/cloudprovider/errors"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/instance"
-	azuretypes "github.com/kubermatic/machine-controller/pkg/cloudprovider/provider/azure/types"
-	cloudprovidertypes "github.com/kubermatic/machine-controller/pkg/cloudprovider/types"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/util"
-	kuberneteshelper "github.com/kubermatic/machine-controller/pkg/kubernetes"
-	"github.com/kubermatic/machine-controller/pkg/providerconfig"
-	providerconfigtypes "github.com/kubermatic/machine-controller/pkg/providerconfig/types"
+	"k8c.io/machine-controller/pkg/cloudprovider/common/ssh"
+	cloudprovidererrors "k8c.io/machine-controller/pkg/cloudprovider/errors"
+	"k8c.io/machine-controller/pkg/cloudprovider/instance"
+	cloudprovidertypes "k8c.io/machine-controller/pkg/cloudprovider/types"
+	kuberneteshelper "k8c.io/machine-controller/pkg/kubernetes"
+	"k8c.io/machine-controller/sdk/apis/cluster/common"
+	clusterv1alpha1 "k8c.io/machine-controller/sdk/apis/cluster/v1alpha1"
+	azuretypes "k8c.io/machine-controller/sdk/cloudprovider/azure"
+	"k8c.io/machine-controller/sdk/net"
+	"k8c.io/machine-controller/sdk/providerconfig"
 
-	v1 "k8s.io/api/core/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/klog"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 )
 
 const (
@@ -73,7 +73,7 @@ const (
 )
 
 type provider struct {
-	configVarResolver *providerconfig.ConfigVarResolver
+	configVarResolver providerconfig.ConfigVarResolver
 }
 
 type config struct {
@@ -112,11 +112,11 @@ type config struct {
 
 type azureVM struct {
 	vm          *compute.VirtualMachine
-	ipAddresses map[string]v1.NodeAddressType
+	ipAddresses map[string]corev1.NodeAddressType
 	status      instance.Status
 }
 
-func (vm *azureVM) Addresses() map[string]v1.NodeAddressType {
+func (vm *azureVM) Addresses() map[string]corev1.NodeAddressType {
 	return vm.ipAddresses
 }
 
@@ -140,54 +140,46 @@ func (vm *azureVM) Status() instance.Status {
 	return vm.status
 }
 
-var imageReferences = map[providerconfigtypes.OperatingSystem]compute.ImageReference{
-	providerconfigtypes.OperatingSystemCentOS: {
-		Publisher: to.StringPtr("OpenLogic"),
-		Offer:     to.StringPtr("CentOS"),
-		Sku:       to.StringPtr("7_9"), // https://docs.microsoft.com/en-us/azure/virtual-machines/linux/using-cloud-init
-		Version:   to.StringPtr("latest"),
-	},
-	providerconfigtypes.OperatingSystemUbuntu: {
+const SKUGen2Ubuntu = "server"
+
+var imageReferences = map[providerconfig.OperatingSystem]compute.ImageReference{
+	providerconfig.OperatingSystemUbuntu: {
 		Publisher: to.StringPtr("Canonical"),
-		Offer:     to.StringPtr("0001-com-ubuntu-server-jammy"),
-		Sku:       to.StringPtr("22_04-lts"),
+		Offer:     to.StringPtr("ubuntu-24_04-lts"),
+		Sku:       to.StringPtr("server-gen1"),
 		Version:   to.StringPtr("latest"),
 	},
-	providerconfigtypes.OperatingSystemRHEL: {
+	providerconfig.OperatingSystemRHEL: {
 		Publisher: to.StringPtr("RedHat"),
 		Offer:     to.StringPtr("rhel-byos"),
-		Sku:       to.StringPtr("rhel-lvm85"),
-		Version:   to.StringPtr("8.5.20220316"),
+		Sku:       to.StringPtr("rhel-lvm95"),
+		Version:   to.StringPtr("9.5.2024112215"),
 	},
-	providerconfigtypes.OperatingSystemFlatcar: {
+	providerconfig.OperatingSystemFlatcar: {
 		Publisher: to.StringPtr("kinvolk"),
-		Offer:     to.StringPtr("flatcar-container-linux"),
-		Sku:       to.StringPtr("stable"),
-		Version:   to.StringPtr("3374.2.0"),
+		// flatcar-container-linux-corevm-amd64 doesn't require a plan. For more info: https://www.flatcar.org/docs/latest/installing/cloud/azure/#corevm
+		Offer:   to.StringPtr("flatcar-container-linux-corevm-amd64"),
+		Sku:     to.StringPtr("stable"),
+		Version: to.StringPtr("4230.2.2"),
 	},
-	providerconfigtypes.OperatingSystemRockyLinux: {
-		Publisher: to.StringPtr("procomputers"),
-		Offer:     to.StringPtr("rocky-linux-8-5"),
-		Sku:       to.StringPtr("rocky-linux-8-5"),
-		Version:   to.StringPtr("8.5.20211118"),
+	providerconfig.OperatingSystemRockyLinux: {
+		Publisher: to.StringPtr("resf"),
+		Offer:     to.StringPtr("rockylinux-x86_64"),
+		Sku:       to.StringPtr("9-base"),
+		Version:   to.StringPtr("9.6.20250531"),
 	},
 }
 
-var osPlans = map[providerconfigtypes.OperatingSystem]*compute.Plan{
-	providerconfigtypes.OperatingSystemFlatcar: {
-		Name:      pointer.String("stable"),
-		Publisher: pointer.String("kinvolk"),
-		Product:   pointer.String("flatcar-container-linux"),
+var osPlans = map[providerconfig.OperatingSystem]*compute.Plan{
+	providerconfig.OperatingSystemRHEL: {
+		Name:      ptr.To("rhel-lvm95"),
+		Publisher: ptr.To("redhat"),
+		Product:   ptr.To("rhel-byos"),
 	},
-	providerconfigtypes.OperatingSystemRHEL: {
-		Name:      pointer.String("rhel-lvm85"),
-		Publisher: pointer.String("redhat"),
-		Product:   pointer.String("rhel-byos"),
-	},
-	providerconfigtypes.OperatingSystemRockyLinux: {
-		Name:      pointer.String("rocky-linux-8-5"),
-		Publisher: pointer.String("procomputers"),
-		Product:   pointer.String("rocky-linux-8-5"),
+	providerconfig.OperatingSystemRockyLinux: {
+		Name:      ptr.To("9-base"),
+		Publisher: ptr.To("resf"),
+		Product:   ptr.To("rockylinux-x86_64"),
 	},
 }
 
@@ -211,7 +203,7 @@ var (
 	cache     = gocache.New(10*time.Minute, 10*time.Minute)
 )
 
-func getOSImageReference(c *config, os providerconfigtypes.OperatingSystem) (*compute.ImageReference, error) {
+func getOSImageReference(c *config, os providerconfig.OperatingSystem) (*compute.ImageReference, error) {
 	if c.ImageID != "" {
 		return &compute.ImageReference{
 			ID: to.StringPtr(c.ImageID),
@@ -236,56 +228,43 @@ func getOSImageReference(c *config, os providerconfigtypes.OperatingSystem) (*co
 }
 
 // New returns a new azure provider.
-func New(configVarResolver *providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
+func New(configVarResolver providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
 	return &provider{configVarResolver: configVarResolver}
 }
 
-func (p *provider) getConfig(provSpec clusterv1alpha1.ProviderSpec) (*config, *providerconfigtypes.Config, error) {
-	if provSpec.Value == nil {
-		return nil, nil, fmt.Errorf("machine.spec.providerconfig.value is nil")
-	}
-
-	pconfig, err := providerconfigtypes.GetConfig(provSpec)
+func (p *provider) getConfig(provSpec clusterv1alpha1.ProviderSpec) (*config, *providerconfig.Config, error) {
+	rawCfg, pConfig, err := newCloudProviderSpec(provSpec)
 	if err != nil {
-		return nil, nil, err
-	}
-
-	if pconfig.OperatingSystemSpec.Raw == nil {
-		return nil, nil, errors.New("operatingSystemSpec in the MachineDeployment cannot be empty")
-	}
-
-	rawCfg, err := azuretypes.GetConfig(*pconfig)
-	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("failed to parse provider spec: %w", err)
 	}
 
 	c := config{}
-	c.SubscriptionID, err = p.configVarResolver.GetConfigVarStringValueOrEnv(rawCfg.SubscriptionID, envSubscriptionID)
+	c.SubscriptionID, err = p.configVarResolver.GetStringValueOrEnv(rawCfg.SubscriptionID, envSubscriptionID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get the value of \"subscriptionID\" field, error = %w", err)
 	}
 
-	c.TenantID, err = p.configVarResolver.GetConfigVarStringValueOrEnv(rawCfg.TenantID, envTenantID)
+	c.TenantID, err = p.configVarResolver.GetStringValueOrEnv(rawCfg.TenantID, envTenantID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get the value of \"tenantID\" field, error = %w", err)
 	}
 
-	c.ClientID, err = p.configVarResolver.GetConfigVarStringValueOrEnv(rawCfg.ClientID, envClientID)
+	c.ClientID, err = p.configVarResolver.GetStringValueOrEnv(rawCfg.ClientID, envClientID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get the value of \"clientID\" field, error = %w", err)
 	}
 
-	c.ClientSecret, err = p.configVarResolver.GetConfigVarStringValueOrEnv(rawCfg.ClientSecret, envClientSecret)
+	c.ClientSecret, err = p.configVarResolver.GetStringValueOrEnv(rawCfg.ClientSecret, envClientSecret)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get the value of \"clientSecret\" field, error = %w", err)
 	}
 
-	c.ResourceGroup, err = p.configVarResolver.GetConfigVarStringValue(rawCfg.ResourceGroup)
+	c.ResourceGroup, err = p.configVarResolver.GetStringValue(rawCfg.ResourceGroup)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get the value of \"resourceGroup\" field, error = %w", err)
 	}
 
-	c.VNetResourceGroup, err = p.configVarResolver.GetConfigVarStringValue(rawCfg.VNetResourceGroup)
+	c.VNetResourceGroup, err = p.configVarResolver.GetStringValue(rawCfg.VNetResourceGroup)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get the value of \"vnetResourceGroup\" field, error = %w", err)
 	}
@@ -294,37 +273,37 @@ func (p *provider) getConfig(provSpec clusterv1alpha1.ProviderSpec) (*config, *p
 		c.VNetResourceGroup = c.ResourceGroup
 	}
 
-	c.Location, err = p.configVarResolver.GetConfigVarStringValue(rawCfg.Location)
+	c.Location, err = p.configVarResolver.GetStringValue(rawCfg.Location)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get the value of \"location\" field, error = %w", err)
 	}
 
-	c.VMSize, err = p.configVarResolver.GetConfigVarStringValue(rawCfg.VMSize)
+	c.VMSize, err = p.configVarResolver.GetStringValue(rawCfg.VMSize)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get the value of \"vmSize\" field, error = %w", err)
 	}
 
-	c.VNetName, err = p.configVarResolver.GetConfigVarStringValue(rawCfg.VNetName)
+	c.VNetName, err = p.configVarResolver.GetStringValue(rawCfg.VNetName)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get the value of \"vnetName\" field, error = %w", err)
 	}
 
-	c.SubnetName, err = p.configVarResolver.GetConfigVarStringValue(rawCfg.SubnetName)
+	c.SubnetName, err = p.configVarResolver.GetStringValue(rawCfg.SubnetName)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get the value of \"subnetName\" field, error = %w", err)
 	}
 
-	c.LoadBalancerSku, err = p.configVarResolver.GetConfigVarStringValue(rawCfg.LoadBalancerSku)
+	c.LoadBalancerSku, err = p.configVarResolver.GetStringValue(rawCfg.LoadBalancerSku)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get the value of \"loadBalancerSku\" field, error = %w", err)
 	}
 
-	c.RouteTableName, err = p.configVarResolver.GetConfigVarStringValue(rawCfg.RouteTableName)
+	c.RouteTableName, err = p.configVarResolver.GetStringValue(rawCfg.RouteTableName)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get the value of \"routeTableName\" field, error = %w", err)
 	}
 
-	c.AssignPublicIP, _, err = p.configVarResolver.GetConfigVarBoolValue(rawCfg.AssignPublicIP)
+	c.AssignPublicIP, _, err = p.configVarResolver.GetBoolValue(rawCfg.AssignPublicIP)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get the value of \"assignPublicIP\" field, error = %w", err)
 	}
@@ -336,12 +315,12 @@ func (p *provider) getConfig(provSpec clusterv1alpha1.ProviderSpec) (*config, *p
 	c.AssignAvailabilitySet = rawCfg.AssignAvailabilitySet
 	c.EnableAcceleratedNetworking = rawCfg.EnableAcceleratedNetworking
 
-	c.AvailabilitySet, err = p.configVarResolver.GetConfigVarStringValue(rawCfg.AvailabilitySet)
+	c.AvailabilitySet, err = p.configVarResolver.GetStringValue(rawCfg.AvailabilitySet)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get the value of \"availabilitySet\" field, error = %w", err)
 	}
 
-	c.SecurityGroupName, err = p.configVarResolver.GetConfigVarStringValue(rawCfg.SecurityGroupName)
+	c.SecurityGroupName, err = p.configVarResolver.GetStringValue(rawCfg.SecurityGroupName)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get the value of \"securityGroupName\" field, error = %w", err)
 	}
@@ -361,22 +340,22 @@ func (p *provider) getConfig(provSpec clusterv1alpha1.ProviderSpec) (*config, *p
 
 	if rawCfg.ImagePlan != nil && rawCfg.ImagePlan.Name != "" {
 		c.ImagePlan = &compute.Plan{
-			Name:      pointer.String(rawCfg.ImagePlan.Name),
-			Publisher: pointer.String(rawCfg.ImagePlan.Publisher),
-			Product:   pointer.String(rawCfg.ImagePlan.Product),
+			Name:      ptr.To(rawCfg.ImagePlan.Name),
+			Publisher: ptr.To(rawCfg.ImagePlan.Publisher),
+			Product:   ptr.To(rawCfg.ImagePlan.Product),
 		}
 	}
 
 	if rawCfg.ImageReference != nil {
 		c.ImageReference = &compute.ImageReference{
-			Publisher: pointer.String(rawCfg.ImageReference.Publisher),
-			Offer:     pointer.String(rawCfg.ImageReference.Offer),
-			Sku:       pointer.String(rawCfg.ImageReference.Sku),
-			Version:   pointer.String(rawCfg.ImageReference.Version),
+			Publisher: ptr.To(rawCfg.ImageReference.Publisher),
+			Offer:     ptr.To(rawCfg.ImageReference.Offer),
+			Sku:       ptr.To(rawCfg.ImageReference.Sku),
+			Version:   ptr.To(rawCfg.ImageReference.Version),
 		}
 	}
 
-	c.ImageID, err = p.configVarResolver.GetConfigVarStringValue(rawCfg.ImageID)
+	c.ImageID, err = p.configVarResolver.GetStringValue(rawCfg.ImageID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get image id: %w", err)
 	}
@@ -385,12 +364,12 @@ func (p *provider) getConfig(provSpec clusterv1alpha1.ProviderSpec) (*config, *p
 		c.EnableBootDiagnostics = *rawCfg.EnableBootDiagnostics
 	}
 
-	return &c, pconfig, nil
+	return &c, pConfig, nil
 }
 
-func getVMIPAddresses(ctx context.Context, c *config, vm *compute.VirtualMachine, ipFamily util.IPFamily) (map[string]v1.NodeAddressType, error) {
+func getVMIPAddresses(ctx context.Context, log *zap.SugaredLogger, c *config, vm *compute.VirtualMachine, ipFamily net.IPFamily) (map[string]corev1.NodeAddressType, error) {
 	var (
-		ipAddresses = map[string]v1.NodeAddressType{}
+		ipAddresses = map[string]corev1.NodeAddressType{}
 		err         error
 	)
 
@@ -398,7 +377,7 @@ func getVMIPAddresses(ctx context.Context, c *config, vm *compute.VirtualMachine
 		return nil, fmt.Errorf("machine is missing properties")
 	}
 
-	if vm.VirtualMachineProperties.NetworkProfile == nil {
+	if vm.NetworkProfile == nil {
 		return nil, fmt.Errorf("machine has no network profile")
 	}
 
@@ -413,7 +392,7 @@ func getVMIPAddresses(ctx context.Context, c *config, vm *compute.VirtualMachine
 
 		splitIfaceID := strings.Split(*iface.ID, "/")
 		ifaceName := splitIfaceID[len(splitIfaceID)-1]
-		ipAddresses, err = getNICIPAddresses(ctx, c, ipFamily, ifaceName)
+		ipAddresses, err = getNICIPAddresses(ctx, log, c, ipFamily, ifaceName)
 		if err != nil || vm.NetworkProfile.NetworkInterfaces == nil {
 			return nil, fmt.Errorf("failed to get addresses for interface %q: %w", ifaceName, err)
 		}
@@ -422,7 +401,7 @@ func getVMIPAddresses(ctx context.Context, c *config, vm *compute.VirtualMachine
 	return ipAddresses, nil
 }
 
-func getNICIPAddresses(ctx context.Context, c *config, ipFamily util.IPFamily, ifaceName string) (map[string]v1.NodeAddressType, error) {
+func getNICIPAddresses(ctx context.Context, log *zap.SugaredLogger, c *config, ipFamily net.IPFamily, ifaceName string) (map[string]corev1.NodeAddressType, error) {
 	ifClient, err := getInterfacesClient(c)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create interfaces client: %w", err)
@@ -433,7 +412,7 @@ func getNICIPAddresses(ctx context.Context, c *config, ipFamily util.IPFamily, i
 		return nil, fmt.Errorf("failed to get interface %q: %w", ifaceName, err)
 	}
 
-	ipAddresses := map[string]v1.NodeAddressType{}
+	ipAddresses := map[string]corev1.NodeAddressType{}
 
 	if netIf.IPConfigurations == nil {
 		return ipAddresses, nil
@@ -444,7 +423,7 @@ func getNICIPAddresses(ctx context.Context, c *config, ipFamily util.IPFamily, i
 		if conf.Name != nil {
 			name = *conf.Name
 		} else {
-			klog.Warningf("IP configuration of NIC %q was returned with no name, trying to dissect the ID.", ifaceName)
+			log.Infow("IP configuration of NIC was returned with no name, trying to dissect the ID.", "interface", ifaceName)
 			if conf.ID == nil || len(*conf.ID) == 0 {
 				return nil, fmt.Errorf("IP configuration of NIC %q was returned with no ID", ifaceName)
 			}
@@ -458,7 +437,7 @@ func getNICIPAddresses(ctx context.Context, c *config, ipFamily util.IPFamily, i
 				return nil, fmt.Errorf("failed to retrieve IP string for IP %q: %w", name, err)
 			}
 			for _, ip := range publicIPs {
-				ipAddresses[ip] = v1.NodeExternalIP
+				ipAddresses[ip] = corev1.NodeExternalIP
 			}
 
 			if ipFamily.HasIPv6() {
@@ -467,7 +446,7 @@ func getNICIPAddresses(ctx context.Context, c *config, ipFamily util.IPFamily, i
 					return nil, fmt.Errorf("failed to retrieve IP string for IP %q: %w", name, err)
 				}
 				for _, ip := range publicIP6s {
-					ipAddresses[ip] = v1.NodeExternalIP
+					ipAddresses[ip] = corev1.NodeExternalIP
 				}
 			}
 		}
@@ -477,7 +456,7 @@ func getNICIPAddresses(ctx context.Context, c *config, ipFamily util.IPFamily, i
 			return nil, fmt.Errorf("failed to retrieve internal IP string for IP %q: %w", name, err)
 		}
 		for _, ip := range internalIPs {
-			ipAddresses[ip] = v1.NodeInternalIP
+			ipAddresses[ip] = corev1.NodeInternalIP
 		}
 	}
 	return ipAddresses, nil
@@ -524,15 +503,86 @@ func getInternalIPAddresses(ctx context.Context, c *config, inetface, ipconfigNa
 	if internalIP.PrivateIPAddress != nil {
 		ipAddresses = append(ipAddresses, *internalIP.PrivateIPAddress)
 	}
-
 	return ipAddresses, nil
 }
 
-func (p *provider) AddDefaults(spec clusterv1alpha1.MachineSpec) (clusterv1alpha1.MachineSpec, error) {
+func (p *provider) AddDefaults(log *zap.SugaredLogger, spec clusterv1alpha1.MachineSpec) (clusterv1alpha1.MachineSpec, error) {
+	rawConfig, pconfig, err := newCloudProviderSpec(spec.ProviderSpec)
+	if err != nil {
+		return spec, fmt.Errorf("failed to parse provider spec: %w", err)
+	}
+
+	if rawConfig.ImageID.Value != "" {
+		return spec, nil
+	}
+
+	// Skip if imageReference is already fully specified
+	if rawConfig.ImageReference != nil && rawConfig.ImageReference.Sku != "" {
+		return spec, nil
+	}
+
+	vmSize := rawConfig.VMSize.Value
+	if vmSize == "" {
+		return spec, nil
+	}
+	if pconfig.OperatingSystem == providerconfig.OperatingSystemUbuntu {
+		if rawConfig.ImageReference == nil {
+			rawConfig.ImageReference = &azuretypes.ImageReference{}
+		}
+
+		if rawConfig.ImageReference.Sku == "" {
+			config, _, err := p.getConfig(spec.ProviderSpec)
+			sku := *imageReferences[providerconfig.OperatingSystemUbuntu].Sku
+
+			if err != nil {
+				log.Warnw("Failed to get Azure config for SKU lookup, defaulting sku heuristically", "error", err)
+				if vmSizeSupportsGen2(vmSize) {
+					sku = SKUGen2Ubuntu
+				}
+			} else {
+				vmSKU, err := getSKU(context.Background(), log, config)
+				if err != nil {
+					log.Warnw("Failed to get Azure config for SKU lookup, defaulting sku heuristic", "error", err)
+					if vmSizeSupportsGen2(vmSize) {
+						sku = SKUGen2Ubuntu
+					}
+				} else {
+					if skuSupportsGen2(vmSKU) {
+						sku = SKUGen2Ubuntu
+						log.Debugw("Using Gen2 image SKU based on Azure API", "vmSize", vmSize)
+					}
+				}
+			}
+
+			rawConfig.ImageReference.Sku = sku
+		}
+
+		if rawConfig.ImageReference.Publisher == "" {
+			rawConfig.ImageReference.Publisher = *imageReferences[providerconfig.OperatingSystemUbuntu].Publisher
+		}
+		if rawConfig.ImageReference.Offer == "" {
+			rawConfig.ImageReference.Offer = *imageReferences[providerconfig.OperatingSystemUbuntu].Offer
+		}
+		if rawConfig.ImageReference.Version == "" {
+			rawConfig.ImageReference.Version = *imageReferences[providerconfig.OperatingSystemUbuntu].Version
+		}
+	}
+
+	updatedCloudProviderSpec, err := json.Marshal(rawConfig)
+	if err != nil {
+		return spec, fmt.Errorf("failed to marshal updated Azure config: %w", err)
+	}
+	pconfig.CloudProviderSpec.Raw = updatedCloudProviderSpec
+
+	spec.ProviderSpec.Value.Raw, err = json.Marshal(pconfig)
+	if err != nil {
+		return spec, fmt.Errorf("failed to marshal provider config: %w", err)
+	}
+
 	return spec, nil
 }
 
-func getStorageProfile(config *config, providerCfg *providerconfigtypes.Config) (*compute.StorageProfile, error) {
+func getStorageProfile(config *config, providerCfg *providerconfig.Config) (*compute.StorageProfile, error) {
 	osRef, err := getOSImageReference(config, providerCfg.OperatingSystem)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get OSImageReference: %w", err)
@@ -543,7 +593,7 @@ func getStorageProfile(config *config, providerCfg *providerconfigtypes.Config) 
 	}
 	if config.OSDiskSize != 0 {
 		sp.OsDisk = &compute.OSDisk{
-			DiskSizeGB:   pointer.Int32(config.OSDiskSize),
+			DiskSizeGB:   ptr.To(config.OSDiskSize),
 			CreateOption: compute.DiskCreateOptionTypesFromImage,
 		}
 
@@ -559,7 +609,7 @@ func getStorageProfile(config *config, providerCfg *providerconfigtypes.Config) 
 			{
 				// this should be in range 0-63 and should be unique per datadisk, since we have only one datadisk, this should be fine
 				Lun:          new(int32),
-				DiskSizeGB:   pointer.Int32(config.DataDiskSize),
+				DiskSizeGB:   ptr.To(config.DataDiskSize),
 				CreateOption: compute.DiskCreateOptionTypesEmpty,
 			},
 		}
@@ -573,7 +623,7 @@ func getStorageProfile(config *config, providerCfg *providerconfigtypes.Config) 
 	return sp, nil
 }
 
-func (p *provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData, userdata string) (instance.Instance, error) {
+func (p *provider) Create(ctx context.Context, log *zap.SugaredLogger, machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData, userdata string) (instance.Instance, error) {
 	config, providerCfg, err := p.getConfig(machine.Spec.ProviderSpec)
 	if err != nil {
 		return nil, cloudprovidererrors.TerminalError{
@@ -618,13 +668,13 @@ func (p *provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine,
 		}); err != nil {
 			return nil, err
 		}
-		publicIP, err = createOrUpdatePublicIPAddress(ctx, publicIPName(ifaceName(machine)), network.IPVersionIPv4, sku, network.IPAllocationMethodStatic, machine.UID, config)
+		publicIP, err = createOrUpdatePublicIPAddress(ctx, log, publicIPName(ifaceName(machine)), network.IPv4, sku, network.Static, machine.UID, config)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create public IP: %w", err)
 		}
 
 		if ipFamily.IsDualstack() {
-			publicIPv6, err = createOrUpdatePublicIPAddress(ctx, publicIPv6Name(ifaceName(machine)), network.IPVersionIPv6, sku, network.IPAllocationMethodStatic, machine.UID, config)
+			publicIPv6, err = createOrUpdatePublicIPAddress(ctx, log, publicIPv6Name(ifaceName(machine)), network.IPv6, sku, network.Static, machine.UID, config)
 			if err != nil {
 				return nil, fmt.Errorf("failed to create public IP: %w", err)
 			}
@@ -639,7 +689,7 @@ func (p *provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine,
 		return nil, err
 	}
 
-	iface, err := createOrUpdateNetworkInterface(ctx, ifaceName(machine), machine.UID, config, publicIP, publicIPv6, ipFamily, config.EnableAcceleratedNetworking)
+	iface, err := createOrUpdateNetworkInterface(ctx, log, ifaceName(machine), machine.UID, config, publicIP, publicIPv6, ipFamily, config.EnableAcceleratedNetworking)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate main network interface: %w", err)
 	}
@@ -700,18 +750,18 @@ func (p *provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine,
 		config.AssignAvailabilitySet != nil && *config.AssignAvailabilitySet && config.AvailabilitySet != "" {
 		// Azure expects the full path to the resource
 		asURI := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Compute/availabilitySets/%s", config.SubscriptionID, config.ResourceGroup, config.AvailabilitySet)
-		vmSpec.VirtualMachineProperties.AvailabilitySet = &compute.SubResource{ID: to.StringPtr(asURI)}
+		vmSpec.AvailabilitySet = &compute.SubResource{ID: to.StringPtr(asURI)}
 	}
 
 	if config.EnableBootDiagnostics {
 		vmSpec.DiagnosticsProfile = &compute.DiagnosticsProfile{
 			BootDiagnostics: &compute.BootDiagnostics{
-				Enabled: pointer.Bool(config.EnableBootDiagnostics),
+				Enabled: ptr.To(config.EnableBootDiagnostics),
 			},
 		}
 	}
 
-	klog.Infof("Creating machine %q", machine.Name)
+	log.Info("Creating machine")
 	if err := data.Update(machine, func(updatedMachine *clusterv1alpha1.Machine) {
 		if !kuberneteshelper.HasFinalizer(updatedMachine, finalizerDisks) {
 			updatedMachine.Finalizers = append(updatedMachine.Finalizers, finalizerDisks)
@@ -744,12 +794,12 @@ func (p *provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine,
 		return nil, fmt.Errorf("failed to retrieve updated data for VM %q: %w", machine.Name, err)
 	}
 
-	ipAddresses, err := getVMIPAddresses(ctx, config, &vm, ipFamily)
+	ipAddresses, err := getVMIPAddresses(ctx, log, config, &vm, ipFamily)
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve IP addresses for VM %q: %w", machine.Name, err)
 	}
 
-	status, err := getVMStatus(ctx, config, machine.Name)
+	status, err := getVMStatus(ctx, log, config, machine.Name)
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve status for VM %q: %w", machine.Name, err)
 	}
@@ -757,14 +807,14 @@ func (p *provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine,
 	return &azureVM{vm: &vm, ipAddresses: ipAddresses, status: status}, nil
 }
 
-func (p *provider) Cleanup(ctx context.Context, machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData) (bool, error) {
+func (p *provider) Cleanup(ctx context.Context, log *zap.SugaredLogger, machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData) (bool, error) {
 	config, _, err := p.getConfig(machine.Spec.ProviderSpec)
 	if err != nil {
 		return false, fmt.Errorf("failed to parse MachineSpec: %w", err)
 	}
 
 	if kuberneteshelper.HasFinalizer(machine, finalizerVM) {
-		klog.Infof("deleting VM %q", machine.Name)
+		log.Info("Deleting VM")
 		if err = deleteVMsByMachineUID(ctx, config, machine.UID); err != nil {
 			return false, fmt.Errorf("failed to delete instance for  machine %q: %w", machine.Name, err)
 		}
@@ -777,7 +827,7 @@ func (p *provider) Cleanup(ctx context.Context, machine *clusterv1alpha1.Machine
 	}
 
 	if kuberneteshelper.HasFinalizer(machine, finalizerDisks) {
-		klog.Infof("deleting disks of VM %q", machine.Name)
+		log.Info("Deleting disks")
 		if err := deleteDisksByMachineUID(ctx, config, machine.UID); err != nil {
 			return false, fmt.Errorf("failed to remove disks of machine %q: %w", machine.Name, err)
 		}
@@ -789,7 +839,7 @@ func (p *provider) Cleanup(ctx context.Context, machine *clusterv1alpha1.Machine
 	}
 
 	if kuberneteshelper.HasFinalizer(machine, finalizerNIC) {
-		klog.Infof("deleting network interfaces of VM %q", machine.Name)
+		log.Info("Deleting network interfaces")
 		if err := deleteInterfacesByMachineUID(ctx, config, machine.UID); err != nil {
 			return false, fmt.Errorf("failed to remove network interfaces of machine %q: %w", machine.Name, err)
 		}
@@ -801,7 +851,7 @@ func (p *provider) Cleanup(ctx context.Context, machine *clusterv1alpha1.Machine
 	}
 
 	if kuberneteshelper.HasFinalizer(machine, finalizerPublicIP) {
-		klog.Infof("deleting public IP addresses of VM %q", machine.Name)
+		log.Infof("Deleting public IP addresses")
 		if err := deleteIPAddressesByMachineUID(ctx, config, machine.UID); err != nil {
 			return false, fmt.Errorf("failed to remove public IP addresses of machine %q: %w", machine.Name, err)
 		}
@@ -844,7 +894,7 @@ func getVMByUID(ctx context.Context, c *config, uid types.UID) (*compute.Virtual
 	return nil, cloudprovidererrors.ErrInstanceNotFound
 }
 
-func getVMStatus(ctx context.Context, c *config, vmName string) (instance.Status, error) {
+func getVMStatus(ctx context.Context, log *zap.SugaredLogger, c *config, vmName string) (instance.Status, error) {
 	vmClient, err := getVMClient(c)
 	if err != nil {
 		return instance.StatusUnknown, err
@@ -863,7 +913,7 @@ func getVMStatus(ctx context.Context, c *config, vmName string) (instance.Status
 	if len(*iv.Statuses) < 2 {
 		provisioningStatus := (*iv.Statuses)[0]
 		if provisioningStatus.Code == nil {
-			klog.Warningf("azure provisioning status has missing code")
+			log.Info("Azure provisioning status has missing code")
 			return instance.StatusUnknown, nil
 		}
 
@@ -873,7 +923,7 @@ func getVMStatus(ctx context.Context, c *config, vmName string) (instance.Status
 		case "ProvisioningState/deleting":
 			return instance.StatusDeleting, nil
 		default:
-			klog.Warningf("unknown Azure provisioning status %q", *provisioningStatus.Code)
+			log.Errorw("Unknown Azure provisioning status", "code", *provisioningStatus.Code, "level", provisioningStatus.Level)
 			return instance.StatusUnknown, nil
 		}
 	}
@@ -882,7 +932,7 @@ func getVMStatus(ctx context.Context, c *config, vmName string) (instance.Status
 	// https://docs.microsoft.com/en-us/azure/virtual-machines/windows/tutorial-manage-vm#vm-power-states
 	powerStatus := (*iv.Statuses)[1]
 	if powerStatus.Code == nil {
-		klog.Warningf("azure power status has missing code")
+		log.Info("Azure power status has missing code")
 		return instance.StatusUnknown, nil
 	}
 
@@ -894,16 +944,16 @@ func getVMStatus(ctx context.Context, c *config, vmName string) (instance.Status
 	case "PowerState/starting":
 		return instance.StatusCreating, nil
 	default:
-		klog.Warningf("unknown Azure power status %q", *powerStatus.Code)
+		log.Errorw("Unknown Azure power status", "code", *powerStatus.Code, "level", powerStatus.Level)
 		return instance.StatusUnknown, nil
 	}
 }
 
-func (p *provider) Get(ctx context.Context, machine *clusterv1alpha1.Machine, _ *cloudprovidertypes.ProviderData) (instance.Instance, error) {
-	return p.get(ctx, machine)
+func (p *provider) Get(ctx context.Context, log *zap.SugaredLogger, machine *clusterv1alpha1.Machine, _ *cloudprovidertypes.ProviderData) (instance.Instance, error) {
+	return p.get(ctx, log, machine)
 }
 
-func (p *provider) get(ctx context.Context, machine *clusterv1alpha1.Machine) (*azureVM, error) {
+func (p *provider) get(ctx context.Context, log *zap.SugaredLogger, machine *clusterv1alpha1.Machine) (*azureVM, error) {
 	config, providerCfg, err := p.getConfig(machine.Spec.ProviderSpec)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse MachineSpec: %w", err)
@@ -919,12 +969,12 @@ func (p *provider) get(ctx context.Context, machine *clusterv1alpha1.Machine) (*
 	}
 
 	ipFamily := providerCfg.Network.GetIPFamily()
-	ipAddresses, err := getVMIPAddresses(ctx, config, vm, ipFamily)
+	ipAddresses, err := getVMIPAddresses(ctx, log, config, vm, ipFamily)
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve IP addresses for VM %v: %w", vm.Name, err)
 	}
 
-	status, err := getVMStatus(ctx, config, machine.Name)
+	status, err := getVMStatus(ctx, log, config, machine.Name)
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve status for VM %v: %w", vm.Name, err)
 	}
@@ -932,45 +982,7 @@ func (p *provider) get(ctx context.Context, machine *clusterv1alpha1.Machine) (*
 	return &azureVM{vm: vm, ipAddresses: ipAddresses, status: status}, nil
 }
 
-func (p *provider) GetCloudConfig(spec clusterv1alpha1.MachineSpec) (config string, name string, err error) {
-	c, _, err := p.getConfig(spec.ProviderSpec)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to parse config: %w", err)
-	}
-
-	var avSet string
-	if c.AssignAvailabilitySet == nil && c.AvailabilitySet != "" ||
-		c.AssignAvailabilitySet != nil && *c.AssignAvailabilitySet && c.AvailabilitySet != "" {
-		avSet = c.AvailabilitySet
-	}
-
-	cc := &azuretypes.CloudConfig{
-		Cloud:                      "AZUREPUBLICCLOUD",
-		TenantID:                   c.TenantID,
-		SubscriptionID:             c.SubscriptionID,
-		AADClientID:                c.ClientID,
-		AADClientSecret:            c.ClientSecret,
-		ResourceGroup:              c.ResourceGroup,
-		VnetResourceGroup:          c.VNetResourceGroup,
-		Location:                   c.Location,
-		VNetName:                   c.VNetName,
-		SubnetName:                 c.SubnetName,
-		LoadBalancerSku:            c.LoadBalancerSku,
-		RouteTableName:             c.RouteTableName,
-		PrimaryAvailabilitySetName: avSet,
-		SecurityGroupName:          c.SecurityGroupName,
-		UseInstanceMetadata:        true,
-	}
-
-	s, err := azuretypes.CloudConfigToString(cc)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to convert cloud-config to string: %w", err)
-	}
-
-	return s, "azure", nil
-}
-
-func validateDiskSKUs(ctx context.Context, c *config, sku compute.ResourceSku) error {
+func validateDiskSKUs(_ context.Context, c *config, sku compute.ResourceSku) error {
 	if c.OSDiskSKU != nil || c.DataDiskSKU != nil {
 		if c.OSDiskSKU != nil {
 			if _, ok := osDiskSKUs[*c.OSDiskSKU]; !ok {
@@ -1002,7 +1014,7 @@ func validateDiskSKUs(ctx context.Context, c *config, sku compute.ResourceSku) e
 	return nil
 }
 
-func validateSKUCapabilities(ctx context.Context, c *config, sku compute.ResourceSku) error {
+func validateSKUCapabilities(_ context.Context, c *config, sku compute.ResourceSku) error {
 	if c.EnableAcceleratedNetworking != nil && *c.EnableAcceleratedNetworking {
 		if !SKUHasCapability(sku, capabilityAcceleratedNetworking) {
 			return fmt.Errorf("VM size %q does not support accelerated networking", c.VMSize)
@@ -1011,7 +1023,7 @@ func validateSKUCapabilities(ctx context.Context, c *config, sku compute.Resourc
 	return nil
 }
 
-func (p *provider) Validate(ctx context.Context, spec clusterv1alpha1.MachineSpec) error {
+func (p *provider) Validate(ctx context.Context, log *zap.SugaredLogger, spec clusterv1alpha1.MachineSpec) error {
 	c, providerConfig, err := p.getConfig(spec.ProviderSpec)
 	if err != nil {
 		return fmt.Errorf("failed to parse config: %w", err)
@@ -1050,14 +1062,14 @@ func (p *provider) Validate(ctx context.Context, spec clusterv1alpha1.MachineSpe
 	}
 
 	switch f := providerConfig.Network.GetIPFamily(); f {
-	case util.IPFamilyUnspecified, util.IPFamilyIPv4:
+	case net.IPFamilyUnspecified, net.IPFamilyIPv4:
 		//noop
-	case util.IPFamilyIPv6:
-		return fmt.Errorf(util.ErrIPv6OnlyUnsupported)
-	case util.IPFamilyIPv4IPv6, util.IPFamilyIPv6IPv4:
+	case net.IPFamilyIPv6:
+		return fmt.Errorf(net.ErrIPv6OnlyUnsupported)
+	case net.IPFamilyIPv4IPv6, net.IPFamilyIPv6IPv4:
 		// validate
 	default:
-		return fmt.Errorf(util.ErrUnknownNetworkFamily, f)
+		return fmt.Errorf(net.ErrUnknownNetworkFamily, f)
 	}
 
 	if c.PublicIPSKU != nil {
@@ -1095,7 +1107,7 @@ func (p *provider) Validate(ctx context.Context, spec clusterv1alpha1.MachineSpe
 		return fmt.Errorf("failed to get subnet: %w", err)
 	}
 
-	sku, err := getSKU(ctx, c)
+	sku, err := getSKU(ctx, log, c)
 	if err != nil {
 		return fmt.Errorf("failed to get VM SKU: %w", err)
 	}
@@ -1124,7 +1136,7 @@ func publicIPv6Name(ifaceName string) string {
 	return ifaceName + "-pubipv6"
 }
 
-func (p *provider) MigrateUID(ctx context.Context, machine *clusterv1alpha1.Machine, newUID types.UID) error {
+func (p *provider) MigrateUID(ctx context.Context, log *zap.SugaredLogger, machine *clusterv1alpha1.Machine, newUID types.UID) error {
 	config, _, err := p.getConfig(machine.Spec.ProviderSpec)
 	if err != nil {
 		return cloudprovidererrors.TerminalError{
@@ -1143,21 +1155,21 @@ func (p *provider) MigrateUID(ctx context.Context, machine *clusterv1alpha1.Mach
 
 	if kuberneteshelper.HasFinalizer(machine, finalizerPublicIPv6) {
 		sku = network.PublicIPAddressSkuNameStandard
-		_, err = createOrUpdatePublicIPAddress(ctx, publicIPv6Name(ifaceName(machine)), network.IPVersionIPv6, sku, network.IPAllocationMethodDynamic, newUID, config)
+		_, err = createOrUpdatePublicIPAddress(ctx, log, publicIPv6Name(ifaceName(machine)), network.IPv6, sku, network.Dynamic, newUID, config)
 		if err != nil {
 			return fmt.Errorf("failed to update UID on public IP: %w", err)
 		}
 	}
 
 	if kuberneteshelper.HasFinalizer(machine, finalizerPublicIP) {
-		_, err = createOrUpdatePublicIPAddress(ctx, publicIPName(ifaceName(machine)), network.IPVersionIPv4, sku, network.IPAllocationMethodStatic, newUID, config)
+		_, err = createOrUpdatePublicIPAddress(ctx, log, publicIPName(ifaceName(machine)), network.IPv4, sku, network.Static, newUID, config)
 		if err != nil {
 			return fmt.Errorf("failed to update UID on public IP: %w", err)
 		}
 	}
 
 	if kuberneteshelper.HasFinalizer(machine, finalizerNIC) {
-		_, err = createOrUpdateNetworkInterface(ctx, ifaceName(machine), newUID, config, publicIP, publicIPv6, util.IPFamilyUnspecified, config.EnableAcceleratedNetworking)
+		_, err = createOrUpdateNetworkInterface(ctx, log, ifaceName(machine), newUID, config, publicIP, publicIPv6, net.IPFamilyUnspecified, config.EnableAcceleratedNetworking)
 		if err != nil {
 			return fmt.Errorf("failed to update UID on main network interface: %w", err)
 		}
@@ -1169,7 +1181,7 @@ func (p *provider) MigrateUID(ctx context.Context, machine *clusterv1alpha1.Mach
 			return fmt.Errorf("failed to get disks client: %w", err)
 		}
 
-		disks, err := getDisksByMachineUID(ctx, disksClient, config, machine.UID)
+		disks, err := getDisksByMachineUID(ctx, disksClient, machine.UID)
 		if err != nil {
 			return fmt.Errorf("failed to get disks: %w", err)
 		}
@@ -1217,13 +1229,13 @@ func (p *provider) MachineMetricsLabels(machine *clusterv1alpha1.Machine) (map[s
 	return labels, err
 }
 
-func (p *provider) SetMetricsForMachines(machines clusterv1alpha1.MachineList) error {
+func (p *provider) SetMetricsForMachines(_ clusterv1alpha1.MachineList) error {
 	return nil
 }
 
-func getOSUsername(os providerconfigtypes.OperatingSystem) string {
+func getOSUsername(os providerconfig.OperatingSystem) string {
 	switch os {
-	case providerconfigtypes.OperatingSystemFlatcar:
+	case providerconfig.OperatingSystemFlatcar:
 		return "core"
 	default:
 		return string(os)
@@ -1328,5 +1340,65 @@ func SKUHasCapability(sku compute.ResourceSku, name string) bool {
 			}
 		}
 	}
+	return false
+}
+
+// getHyperVGenerations returns the supported Hyper-V generations for a VM SKU.
+// Returns a string like "V1,V2" or "V2" or "V1" from the Azure API.
+func getHyperVGenerations(sku compute.ResourceSku) string {
+	if sku.Capabilities != nil {
+		for _, capability := range *sku.Capabilities {
+			if capability.Name != nil && *capability.Name == "HyperVGenerations" && capability.Value != nil {
+				return *capability.Value
+			}
+		}
+	}
+	return ""
+}
+
+// skuSupportsGen2 checks if a VM SKU supports Generation 2 VMs using Azure API.
+func skuSupportsGen2(sku compute.ResourceSku) bool {
+	generations := getHyperVGenerations(sku)
+	return strings.Contains(generations, "V2")
+}
+
+// vmSizeSupportsGen2 checks if a VM size is known to support Generation 2 VMs using heuristics.
+func vmSizeSupportsGen2(vmSize string) bool {
+	size := strings.ToLower(vmSize)
+
+	if !strings.HasPrefix(size, "standard_") {
+		return false
+	}
+
+	// A-family explicitly does NOT support Gen2 per Azure docs.
+	if strings.HasPrefix(size, "standard_a") {
+		return false
+	}
+
+	// Families that have Gen2 support according to:
+	// https://learn.microsoft.com/azure/virtual-machines/generation-2
+	//
+	// Actual availability still depends on the specific SKU and region.
+	gen2Families := []string{
+		"standard_b",
+		"standard_d",
+		"standard_f",
+		"standard_e",
+		"standard_m",
+		"standard_l",
+		"standard_nc",
+		"standard_nd",
+		"standard_nv",
+		"standard_hb",
+		"standard_hc",
+		"standard_hx",
+	}
+
+	for _, family := range gen2Families {
+		if strings.HasPrefix(size, family) {
+			return true
+		}
+	}
+
 	return false
 }

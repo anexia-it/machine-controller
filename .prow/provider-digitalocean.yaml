@@ -17,6 +17,7 @@ presubmits:
     run_if_changed: "(pkg/cloudprovider/provider/digitalocean/|pkg/userdata)"
     decorate: true
     clone_uri: "ssh://git@github.com/kubermatic/machine-controller.git"
+    path_alias: k8c.io/machine-controller
     labels:
       preset-digitalocean: "true"
       preset-hetzner: "true"
@@ -27,7 +28,7 @@ presubmits:
       preset-kubeconfig-ci: "true"
     spec:
       containers:
-        - image: quay.io/kubermatic/build:go-1.19-node-18-kind-0.17-5
+        - image: quay.io/kubermatic/build:go-1.25-node-22-kind-0.30-8
           command:
             - "./hack/ci/run-e2e-tests.sh"
           args:

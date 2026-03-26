@@ -23,10 +23,10 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	clusterv1alpha1 "github.com/kubermatic/machine-controller/pkg/apis/cluster/v1alpha1"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider"
-	"github.com/kubermatic/machine-controller/pkg/providerconfig"
-	providerconfigtypes "github.com/kubermatic/machine-controller/pkg/providerconfig/types"
+	"k8c.io/machine-controller/pkg/cloudprovider"
+	clusterv1alpha1 "k8c.io/machine-controller/sdk/apis/cluster/v1alpha1"
+	"k8c.io/machine-controller/sdk/providerconfig"
+	"k8c.io/machine-controller/sdk/providerconfig/configvar"
 
 	"k8s.io/apimachinery/pkg/api/equality"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -50,6 +50,16 @@ func NewMachineControllerMetrics() *MetricsCollection {
 			Name: metricsPrefix + "errors_total",
 			Help: "The total number or unexpected errors the controller encountered",
 		}),
+		Provisioning: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name:    metricsPrefix + "provisioning_time_seconds",
+			Help:    "Histogram of times spent from creating a Machine to ready state in the cluster",
+			Buckets: prometheus.ExponentialBuckets(32, 1.5, 10),
+		}),
+		Deprovisioning: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name:    metricsPrefix + "deprovisioning_time_seconds",
+			Help:    "Histogram of times spent from deleting a Machine to be removed from cluster and cloud provider",
+			Buckets: prometheus.ExponentialBuckets(32, 1.5, 10),
+		}),
 	}
 
 	// Set default values, so that these metrics always show up
@@ -70,8 +80,8 @@ type MachineCollector struct {
 
 type machineMetricLabels struct {
 	KubeletVersion  string
-	CloudProvider   providerconfigtypes.CloudProvider
-	OperatingSystem providerconfigtypes.OperatingSystem
+	CloudProvider   providerconfig.CloudProvider
+	OperatingSystem providerconfig.OperatingSystem
 	ProviderLabels  map[string]string
 }
 
@@ -113,7 +123,7 @@ func (l *machineMetricLabels) Counter(value uint) prometheus.Counter {
 
 func NewMachineCollector(ctx context.Context, client ctrlruntimeclient.Client) *MachineCollector {
 	// Start periodically calling the providers SetMetricsForMachines in a dedicated go routine
-	skg := providerconfig.NewConfigVarResolver(ctx, client)
+	configResolver := configvar.NewResolver(ctx, client)
 	go func() {
 		metricGatheringExecutor := func() {
 			machines := &clusterv1alpha1.MachineList{}
@@ -129,9 +139,9 @@ func NewMachineCollector(ctx context.Context, client ctrlruntimeclient.Client) *
 				return
 			}
 
-			providerMachineMap := map[providerconfigtypes.CloudProvider]*clusterv1alpha1.MachineList{}
+			providerMachineMap := map[providerconfig.CloudProvider]*clusterv1alpha1.MachineList{}
 			for _, machine := range machines.Items {
-				providerConfig, err := providerconfigtypes.GetConfig(machine.Spec.ProviderSpec)
+				providerConfig, err := providerconfig.GetConfig(machine.Spec.ProviderSpec)
 				if err != nil {
 					utilruntime.HandleError(fmt.Errorf("failed to get providerSpec for SetMetricsForMachines: %w", err))
 					continue
@@ -143,7 +153,7 @@ func NewMachineCollector(ctx context.Context, client ctrlruntimeclient.Client) *
 			}
 
 			for provider, providerMachineList := range providerMachineMap {
-				prov, err := cloudprovider.ForProvider(provider, skg)
+				prov, err := cloudprovider.ForProvider(provider, configResolver)
 				if err != nil {
 					utilruntime.HandleError(fmt.Errorf("failed to get cloud provider for SetMetricsForMachines:: %q: %w", provider, err))
 					continue
@@ -196,7 +206,7 @@ func (mc MachineCollector) Collect(ch chan<- prometheus.Metric) {
 		return
 	}
 
-	cvr := providerconfig.NewConfigVarResolver(mc.ctx, mc.client)
+	configResolver := configvar.NewResolver(mc.ctx, mc.client)
 	machineCountByLabels := make(map[*machineMetricLabels]uint)
 
 	for _, machine := range machines.Items {
@@ -216,13 +226,13 @@ func (mc MachineCollector) Collect(ch chan<- prometheus.Metric) {
 			)
 		}
 
-		providerConfig, err := providerconfigtypes.GetConfig(machine.Spec.ProviderSpec)
+		providerConfig, err := providerconfig.GetConfig(machine.Spec.ProviderSpec)
 		if err != nil {
 			utilruntime.HandleError(fmt.Errorf("failed to determine providerSpec for machine %s: %w", machine.Name, err))
 			continue
 		}
 
-		provider, err := cloudprovider.ForProvider(providerConfig.CloudProvider, cvr)
+		provider, err := cloudprovider.ForProvider(providerConfig.CloudProvider, configResolver)
 		if err != nil {
 			utilruntime.HandleError(fmt.Errorf("failed to determine provider provider: %w", err))
 			continue

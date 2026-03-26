@@ -5,6 +5,8 @@ metadata:
   labels:
     kubevirt.io/vm: pvc-image-source
     cluster.x-k8s.io/cluster-name: cluster-name
+    kubermatic.k8c.io/cluster-id: "cluster-name"
+    kubermatic.k8c.io/project-id: ""
     cluster.x-k8s.io/role: worker
     md: md-name
   name: pvc-image-source
@@ -14,9 +16,9 @@ spec:
     - metadata:
         name: pvc-image-source
       spec:
-        pvc:
+        storage:
           accessModes:
-            - ReadWriteOnce
+            - ReadWriteMany
           resources:
             requests:
               storage: 10Gi
@@ -25,13 +27,18 @@ spec:
           pvc:
             namespace: ns
             name: dvname
-  running: true
+  runStrategy: Once
   template:
     metadata:
       creationTimestamp: null
+      annotations:
+        "kubevirt.io/allow-pod-bridge-network-live-migration": "true"
+        "ovn.kubernetes.io/allow_live_migration": "true"
       labels:
         kubevirt.io/vm: pvc-image-source
         cluster.x-k8s.io/cluster-name: cluster-name
+        kubermatic.k8c.io/cluster-id: "cluster-name"
+        kubermatic.k8c.io/project-id: ""
         cluster.x-k8s.io/role: worker
         md: md-name
     spec:
@@ -46,9 +53,9 @@ spec:
                 bus: virtio
               name: cloudinitdisk
           interfaces:
-            - macAddress: b6:f5:b4:fe:45:1d
-              name: default
+            - name: default
               bridge: {}
+          networkInterfaceMultiqueue: true
         resources:
           limits:
             cpu: "2"

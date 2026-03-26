@@ -22,22 +22,28 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
-	nutanixclient "github.com/nutanix-cloud-native/prism-go-client"
+	"github.com/nutanix-cloud-native/prism-go-client/environment/types"
 	nutanixv3 "github.com/nutanix-cloud-native/prism-go-client/v3"
 
-	"github.com/kubermatic/machine-controller/pkg/apis/cluster/common"
-	cloudprovidererrors "github.com/kubermatic/machine-controller/pkg/cloudprovider/errors"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/instance"
-	nutanixtypes "github.com/kubermatic/machine-controller/pkg/cloudprovider/provider/nutanix/types"
-	providerconfigtypes "github.com/kubermatic/machine-controller/pkg/providerconfig/types"
+	cloudprovidererrors "k8c.io/machine-controller/pkg/cloudprovider/errors"
+	"k8c.io/machine-controller/pkg/cloudprovider/instance"
+	"k8c.io/machine-controller/sdk/apis/cluster/common"
+	nutanixtypes "k8c.io/machine-controller/sdk/cloudprovider/nutanix"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 )
+
+// Shared client cache to persist between calls.
+var clientCache = nutanixv3.NewClientCache(nutanixv3.WithSessionAuth(true))
 
 const (
 	invalidCredentials = "invalid Nutanix Credentials"
@@ -45,6 +51,22 @@ const (
 
 type ClientSet struct {
 	Prism *nutanixv3.Client
+}
+
+// cachedClientParams implements the nutanixv3.CachedClientParams interface.
+type cachedClientParams struct {
+	managementEndpoint types.ManagementEndpoint
+	clusterName        string
+}
+
+// ManagementEndpoint returns the management endpoint.
+func (c *cachedClientParams) ManagementEndpoint() types.ManagementEndpoint {
+	return c.managementEndpoint
+}
+
+// Key returns a unique key for the client.
+func (c *cachedClientParams) Key() string {
+	return c.clusterName
 }
 
 func GetClientSet(config *Config) (*ClientSet, error) {
@@ -64,26 +86,67 @@ func GetClientSet(config *Config) (*ClientSet, error) {
 		return nil, errors.New("no endpoint specified")
 	}
 
+	if config.ClusterName == "" {
+		return nil, errors.New("no clusterName specified")
+	}
+
 	// set up 9440 as default port if none is passed via config
 	port := 9440
 	if config.Port != nil {
 		port = *config.Port
 	}
 
-	credentials := nutanixclient.Credentials{
-		URL:      fmt.Sprintf("%s:%d", config.Endpoint, port),
-		Endpoint: config.Endpoint,
-		Port:     fmt.Sprint(port),
-		Username: config.Username,
-		Password: config.Password,
+	// Create the management endpoint URL
+	endpointURL, err := url.Parse(fmt.Sprintf("https://%s", net.JoinHostPort(config.Endpoint, strconv.Itoa(port))))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse endpoint URL: %w", err)
+	}
+
+	// Create the management endpoint
+	managementEndpoint := types.ManagementEndpoint{
+		ApiCredentials: types.ApiCredentials{
+			Username: config.Username,
+			Password: config.Password,
+		},
+		Address:  endpointURL,
 		Insecure: config.AllowInsecure,
 	}
 
-	if config.ProxyURL != "" {
-		credentials.ProxyURL = config.ProxyURL
+	// Create cached client parameters
+	cachedParams := &cachedClientParams{
+		managementEndpoint: managementEndpoint,
+		clusterName:        config.ClusterName,
 	}
 
-	clientV3, err := nutanixv3.NewV3Client(credentials)
+	// Prepare client options
+	var clientOptions []nutanixv3.ClientOption
+
+	// Add proxy configuration if provided
+	if config.ProxyURL != "" {
+		proxyURL, err := url.Parse(config.ProxyURL)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse proxy URL: %w", err)
+		}
+
+		// Create a custom transport with proxy
+		transport := &http.Transport{
+			Proxy: http.ProxyURL(proxyURL),
+			DialContext: (&net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			ForceAttemptHTTP2:     true,
+			MaxIdleConns:          100,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		}
+
+		clientOptions = append(clientOptions, nutanixv3.WithRoundTripper(transport))
+	}
+
+	// Get or create the cached client
+	clientV3, err := clientCache.GetOrCreate(cachedParams, clientOptions...)
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +156,7 @@ func GetClientSet(config *Config) (*ClientSet, error) {
 	}, nil
 }
 
-func createVM(ctx context.Context, client *ClientSet, name string, conf Config, os providerconfigtypes.OperatingSystem, userdata string) (instance.Instance, error) {
+func createVM(ctx context.Context, client *ClientSet, name string, conf Config, userdata string) (instance.Instance, error) {
 	cluster, err := getClusterByName(ctx, client, conf.ClusterName)
 	if err != nil {
 		return nil, err
@@ -107,7 +170,7 @@ func createVM(ctx context.Context, client *ClientSet, name string, conf Config, 
 	nicList := []*nutanixv3.VMNic{
 		{
 			SubnetReference: &nutanixv3.Reference{
-				Kind: pointer.String(nutanixtypes.SubnetKind),
+				Kind: ptr.To(nutanixtypes.SubnetKind),
 				UUID: subnet.Metadata.UUID,
 			},
 		},
@@ -120,7 +183,7 @@ func createVM(ctx context.Context, client *ClientSet, name string, conf Config, 
 		}
 		additionalSubnetNic := &nutanixv3.VMNic{
 			SubnetReference: &nutanixv3.Reference{
-				Kind: pointer.String(nutanixtypes.SubnetKind),
+				Kind: ptr.To(nutanixtypes.SubnetKind),
 				UUID: additionalSubnet.Metadata.UUID,
 			},
 		}
@@ -134,41 +197,41 @@ func createVM(ctx context.Context, client *ClientSet, name string, conf Config, 
 
 	request := &nutanixv3.VMIntentInput{
 		Metadata: &nutanixv3.Metadata{
-			Kind:       pointer.String(nutanixtypes.VMKind),
+			Kind:       ptr.To(nutanixtypes.VMKind),
 			Categories: conf.Categories,
 		},
 		Spec: &nutanixv3.VM{
-			Name: pointer.String(name),
+			Name: ptr.To(name),
 			ClusterReference: &nutanixv3.Reference{
-				Kind: pointer.String(nutanixtypes.ClusterKind),
+				Kind: ptr.To(nutanixtypes.ClusterKind),
 				UUID: cluster.Metadata.UUID,
 			},
 		},
 	}
 
 	resources := &nutanixv3.VMResources{
-		PowerState:    pointer.String("ON"),
-		NumSockets:    pointer.Int64(conf.CPUs),
-		MemorySizeMib: pointer.Int64(conf.MemoryMB),
+		PowerState:    ptr.To("ON"),
+		NumSockets:    ptr.To(conf.CPUs),
+		MemorySizeMib: ptr.To(conf.MemoryMB),
 		NicList:       nicList,
 		DiskList: []*nutanixv3.VMDisk{
 			{
 				DeviceProperties: &nutanixv3.VMDiskDeviceProperties{
-					DeviceType: pointer.String("DISK"),
+					DeviceType: ptr.To("DISK"),
 					DiskAddress: &nutanixv3.DiskAddress{
-						DeviceIndex: pointer.Int64(0),
-						AdapterType: pointer.String("SCSI"),
+						DeviceIndex: ptr.To(int64(0)),
+						AdapterType: ptr.To("SCSI"),
 					},
 				},
 				DataSourceReference: &nutanixv3.Reference{
-					Kind: pointer.String(nutanixtypes.ImageKind),
+					Kind: ptr.To(nutanixtypes.ImageKind),
 					UUID: image.Metadata.UUID,
 				},
 			},
 		},
 		GuestCustomization: &nutanixv3.GuestCustomization{
 			CloudInit: &nutanixv3.GuestCustomizationCloudInit{
-				UserData: pointer.String(base64.StdEncoding.EncodeToString([]byte(userdata))),
+				UserData: ptr.To(base64.StdEncoding.EncodeToString([]byte(userdata))),
 			},
 		},
 	}
@@ -180,7 +243,7 @@ func createVM(ctx context.Context, client *ClientSet, name string, conf Config, 
 		}
 
 		request.Metadata.ProjectReference = &nutanixv3.Reference{
-			Kind: pointer.String(nutanixtypes.ProjectKind),
+			Kind: ptr.To(nutanixtypes.ProjectKind),
 			UUID: project.Metadata.UUID,
 		}
 	}
@@ -194,7 +257,7 @@ func createVM(ctx context.Context, client *ClientSet, name string, conf Config, 
 	}
 
 	if conf.DiskSizeGB != nil {
-		resources.DiskList[0].DiskSizeMib = pointer.Int64(*conf.DiskSizeGB * 1024)
+		resources.DiskList[0].DiskSizeMib = ptr.To(*conf.DiskSizeGB * 1024)
 	}
 
 	request.Spec.Resources = resources
@@ -368,7 +431,7 @@ func getVMByName(ctx context.Context, client *ClientSet, name string, projectID 
 func getIPs(ctx context.Context, client *ClientSet, vmID string, interval time.Duration, timeout time.Duration) (map[string]corev1.NodeAddressType, error) {
 	addresses := make(map[string]corev1.NodeAddressType)
 
-	if err := wait.Poll(interval, timeout, func() (bool, error) {
+	err := wait.PollUntilContextTimeout(ctx, interval, timeout, false, func(ctx context.Context) (bool, error) {
 		vm, err := client.Prism.V3.GetVM(ctx, vmID)
 		if err != nil {
 			return false, wrapNutanixError(err)
@@ -382,7 +445,8 @@ func getIPs(ctx context.Context, client *ClientSet, vmID string, interval time.D
 		addresses[ip] = corev1.NodeInternalIP
 
 		return true, nil
-	}); err != nil {
+	})
+	if err != nil {
 		return map[string]corev1.NodeAddressType{}, err
 	}
 
@@ -390,7 +454,7 @@ func getIPs(ctx context.Context, client *ClientSet, vmID string, interval time.D
 }
 
 func waitForCompletion(ctx context.Context, client *ClientSet, taskID string, interval time.Duration, timeout time.Duration) error {
-	return wait.Poll(interval, timeout, func() (bool, error) {
+	return wait.PollUntilContextTimeout(ctx, interval, timeout, false, func(ctx context.Context) (bool, error) {
 		task, err := client.Prism.V3.GetTask(ctx, taskID)
 		if err != nil {
 			return false, wrapNutanixError(err)
@@ -402,19 +466,19 @@ func waitForCompletion(ctx context.Context, client *ClientSet, taskID string, in
 
 		switch *task.Status {
 		case "INVALID_UUID", "FAILED":
-			return false, fmt.Errorf("bad status: %s", *task.Status)
+			return false, fmt.Errorf("bad status: %s, error detail: %s, progress message: %s", *task.Status, *task.ErrorDetail, *task.ProgressMessage)
 		case "QUEUED", "RUNNING":
 			return false, nil
 		case "SUCCEEDED":
 			return true, nil
 		default:
-			return false, fmt.Errorf("unknown status: %s", *task.Status)
+			return false, fmt.Errorf("unknown status: %s, error detail: %s, progress message: %s", *task.Status, *task.ErrorDetail, *task.ProgressMessage)
 		}
 	})
 }
 
 func waitForPowerState(ctx context.Context, client *ClientSet, vmID string, interval time.Duration, timeout time.Duration) error {
-	return wait.Poll(interval, timeout, func() (bool, error) {
+	return wait.PollUntilContextTimeout(ctx, interval, timeout, false, func(ctx context.Context) (bool, error) {
 		vm, err := client.Prism.V3.GetVM(ctx, vmID)
 		if err != nil {
 			return false, wrapNutanixError(err)

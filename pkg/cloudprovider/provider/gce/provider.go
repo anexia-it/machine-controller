@@ -29,17 +29,17 @@ import (
 
 	"cloud.google.com/go/logging"
 	monitoring "cloud.google.com/go/monitoring/apiv3/v2"
+	"go.uber.org/zap"
 	compute "google.golang.org/api/compute/v1"
 	"google.golang.org/api/googleapi"
 
-	"github.com/kubermatic/machine-controller/pkg/apis/cluster/common"
-	clusterv1alpha1 "github.com/kubermatic/machine-controller/pkg/apis/cluster/v1alpha1"
-	cloudprovidererrors "github.com/kubermatic/machine-controller/pkg/cloudprovider/errors"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/instance"
-	gcetypes "github.com/kubermatic/machine-controller/pkg/cloudprovider/provider/gce/types"
-	cloudprovidertypes "github.com/kubermatic/machine-controller/pkg/cloudprovider/types"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/util"
-	"github.com/kubermatic/machine-controller/pkg/providerconfig"
+	cloudprovidererrors "k8c.io/machine-controller/pkg/cloudprovider/errors"
+	"k8c.io/machine-controller/pkg/cloudprovider/instance"
+	cloudprovidertypes "k8c.io/machine-controller/pkg/cloudprovider/types"
+	"k8c.io/machine-controller/sdk/apis/cluster/common"
+	clusterv1alpha1 "k8c.io/machine-controller/sdk/apis/cluster/v1alpha1"
+	"k8c.io/machine-controller/sdk/net"
+	"k8c.io/machine-controller/sdk/providerconfig"
 
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -56,7 +56,6 @@ const (
 	errInvalidDiskType       = "Disk type is missing or has wrong type, allowed are 'pd-standard' and 'pd-ssd'"
 	errRetrieveInstance      = "Failed to retrieve instance: %v"
 	errGotTooManyInstances   = "Got more than 1 instance matching the machine UID label"
-	errCloudConfig           = "Failed to convert cloud-config to string: %v"
 	errInsertInstance        = "Failed to insert instance: %v"
 	errDeleteInstance        = "Failed to delete instance: %v"
 	errSetLabels             = "Failed to set the labels for the new machine UID: %v"
@@ -73,18 +72,18 @@ var _ cloudprovidertypes.Provider = New(nil)
 
 // Provider implements the cloud.Provider interface for the Google Cloud Platform.
 type Provider struct {
-	resolver *providerconfig.ConfigVarResolver
+	resolver providerconfig.ConfigVarResolver
 }
 
 // New creates a cloud provider instance for the Google Cloud Platform.
-func New(configVarResolver *providerconfig.ConfigVarResolver) *Provider {
+func New(configVarResolver providerconfig.ConfigVarResolver) *Provider {
 	return &Provider{
 		resolver: configVarResolver,
 	}
 }
 
 // AddDefaults reads the MachineSpec and applies defaults for provider specific fields.
-func (p *Provider) AddDefaults(spec clusterv1alpha1.MachineSpec) (clusterv1alpha1.MachineSpec, error) {
+func (p *Provider) AddDefaults(_ *zap.SugaredLogger, spec clusterv1alpha1.MachineSpec) (clusterv1alpha1.MachineSpec, error) {
 	// Read cloud provider spec.
 	cpSpec, _, err := newCloudProviderSpec(spec.ProviderSpec)
 	if err != nil {
@@ -102,7 +101,7 @@ func (p *Provider) AddDefaults(spec clusterv1alpha1.MachineSpec) (clusterv1alpha
 }
 
 // Validate checks the given machine's specification.
-func (p *Provider) Validate(_ context.Context, spec clusterv1alpha1.MachineSpec) error {
+func (p *Provider) Validate(_ context.Context, _ *zap.SugaredLogger, spec clusterv1alpha1.MachineSpec) error {
 	// Read configuration.
 	cfg, err := newConfig(p.resolver, spec.ProviderSpec)
 	if err != nil {
@@ -117,13 +116,13 @@ func (p *Provider) Validate(_ context.Context, spec clusterv1alpha1.MachineSpec)
 	}
 
 	switch cfg.providerConfig.Network.GetIPFamily() {
-	case util.IPFamilyUnspecified, util.IPFamilyIPv4:
+	case net.IPFamilyUnspecified, net.IPFamilyIPv4:
 		// noop
-	case util.IPFamilyIPv6:
-		return newError(common.InvalidConfigurationMachineError, util.ErrIPv6OnlyUnsupported)
-	case util.IPFamilyIPv4IPv6, util.IPFamilyIPv6IPv4:
+	case net.IPFamilyIPv6:
+		return newError(common.InvalidConfigurationMachineError, net.ErrIPv6OnlyUnsupported)
+	case net.IPFamilyIPv4IPv6, net.IPFamilyIPv6IPv4:
 	default:
-		return newError(common.InvalidConfigurationMachineError, util.ErrUnknownNetworkFamily, cfg.providerConfig.Network.GetIPFamily())
+		return newError(common.InvalidConfigurationMachineError, net.ErrUnknownNetworkFamily, cfg.providerConfig.Network.GetIPFamily())
 	}
 
 	if cfg.machineType == "" {
@@ -143,18 +142,18 @@ func (p *Provider) Validate(_ context.Context, spec clusterv1alpha1.MachineSpec)
 }
 
 // Get retrieves a node instance that is associated with the given machine.
-func (p *Provider) Get(_ context.Context, machine *clusterv1alpha1.Machine, _ *cloudprovidertypes.ProviderData) (instance.Instance, error) {
-	return p.get(machine)
+func (p *Provider) Get(ctx context.Context, _ *zap.SugaredLogger, machine *clusterv1alpha1.Machine, _ *cloudprovidertypes.ProviderData) (instance.Instance, error) {
+	return p.get(ctx, machine)
 }
 
-func (p *Provider) get(machine *clusterv1alpha1.Machine) (*googleInstance, error) {
+func (p *Provider) get(ctx context.Context, machine *clusterv1alpha1.Machine) (*googleInstance, error) {
 	// Read configuration.
 	cfg, err := newConfig(p.resolver, machine.Spec.ProviderSpec)
 	if err != nil {
 		return nil, newError(common.InvalidConfigurationMachineError, errMachineSpec, err)
 	}
 	// Connect to Google compute.
-	svc, err := connectComputeService(cfg)
+	svc, err := connectComputeService(ctx, cfg)
 	if err != nil {
 		return nil, newError(common.InvalidConfigurationMachineError, errConnect, err)
 	}
@@ -183,46 +182,20 @@ func (p *Provider) get(machine *clusterv1alpha1.Machine) (*googleInstance, error
 	}, nil
 }
 
-// GetCloudConfig returns the cloud provider specific cloud-config for the kubelet.
-func (p *Provider) GetCloudConfig(spec clusterv1alpha1.MachineSpec) (config string, name string, err error) {
-	// Read configuration.
-	cfg, err := newConfig(p.resolver, spec.ProviderSpec)
-	if err != nil {
-		return "", "", newError(common.InvalidConfigurationMachineError, errMachineSpec, err)
-	}
-	// Init cloud configuration.
-	cc := &gcetypes.CloudConfig{
-		Global: gcetypes.GlobalOpts{
-			ProjectID:      cfg.projectID,
-			LocalZone:      cfg.zone,
-			MultiZone:      cfg.multizone,
-			Regional:       cfg.regional,
-			NetworkName:    cfg.network,
-			SubnetworkName: cfg.subnetwork,
-			NodeTags:       cfg.tags,
-		},
-	}
-	config, err = cc.AsString()
-	if err != nil {
-		return "", "", newError(common.InvalidConfigurationMachineError, errCloudConfig, err)
-	}
-	return config, "gce", nil
-}
-
 // Create inserts a cloud instance according to the given machine.
-func (p *Provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData, userdata string) (instance.Instance, error) {
+func (p *Provider) Create(ctx context.Context, log *zap.SugaredLogger, machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData, userdata string) (instance.Instance, error) {
 	// Read configuration.
 	cfg, err := newConfig(p.resolver, machine.Spec.ProviderSpec)
 	if err != nil {
 		return nil, newError(common.InvalidConfigurationMachineError, errMachineSpec, err)
 	}
 	// Connect to Google compute.
-	svc, err := connectComputeService(cfg)
+	svc, err := connectComputeService(ctx, cfg)
 	if err != nil {
 		return nil, newError(common.InvalidConfigurationMachineError, errConnect, err)
 	}
 	// Create Google compute instance spec and insert it.
-	networkInterfaces, err := svc.networkInterfaces(cfg)
+	networkInterfaces, err := svc.networkInterfaces(log, cfg)
 	if err != nil {
 		return nil, newError(common.InvalidConfigurationMachineError, errMachineSpec, err)
 	}
@@ -261,7 +234,7 @@ func (p *Provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine,
 	if !cfg.disableMachineServiceAccount {
 		inst.ServiceAccounts = []*compute.ServiceAccount{
 			{
-				Email: cfg.jwtConfig.Email,
+				Email: cfg.clientConfig.ClientEmail,
 				Scopes: append(
 					monitoring.DefaultAuthScopes(),
 					compute.ComputeScope,
@@ -294,23 +267,23 @@ func (p *Provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine,
 	if err != nil {
 		return nil, newError(common.InvalidConfigurationMachineError, errInsertInstance, err)
 	}
-	err = svc.waitZoneOperation(cfg, op.Name)
+	err = svc.waitZoneOperation(ctx, cfg, op.Name)
 	if err != nil {
 		return nil, newError(common.InvalidConfigurationMachineError, errInsertInstance, err)
 	}
 	// Retrieve it to get a full qualified instance.
-	return p.Get(ctx, machine, data)
+	return p.Get(ctx, log, machine, data)
 }
 
 // Cleanup deletes the instance associated with the machine and all associated resources.
-func (p *Provider) Cleanup(_ context.Context, machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData) (bool, error) {
+func (p *Provider) Cleanup(ctx context.Context, _ *zap.SugaredLogger, machine *clusterv1alpha1.Machine, _ *cloudprovidertypes.ProviderData) (bool, error) {
 	// Read configuration.
 	cfg, err := newConfig(p.resolver, machine.Spec.ProviderSpec)
 	if err != nil {
 		return false, newError(common.InvalidConfigurationMachineError, errMachineSpec, err)
 	}
 	// Connect to Google compute.
-	svc, err := connectComputeService(cfg)
+	svc, err := connectComputeService(ctx, cfg)
 	if err != nil {
 		return false, newError(common.InvalidConfigurationMachineError, errConnect, err)
 	}
@@ -325,7 +298,7 @@ func (p *Provider) Cleanup(_ context.Context, machine *clusterv1alpha1.Machine, 
 		}
 		return false, newError(common.InvalidConfigurationMachineError, errDeleteInstance, err)
 	}
-	err = svc.waitZoneOperation(cfg, op.Name)
+	err = svc.waitZoneOperation(ctx, cfg, op.Name)
 	if err != nil {
 		return false, newError(common.InvalidConfigurationMachineError, errDeleteInstance, err)
 	}
@@ -354,19 +327,19 @@ func (p *Provider) MachineMetricsLabels(machine *clusterv1alpha1.Machine) (map[s
 
 // MigrateUID updates the UID of an instance after the controller migrates types
 // and the UID of the machine object changed.
-func (p *Provider) MigrateUID(_ context.Context, machine *clusterv1alpha1.Machine, newUID types.UID) error {
+func (p *Provider) MigrateUID(ctx context.Context, _ *zap.SugaredLogger, machine *clusterv1alpha1.Machine, newUID types.UID) error {
 	// Read configuration.
 	cfg, err := newConfig(p.resolver, machine.Spec.ProviderSpec)
 	if err != nil {
 		return newError(common.InvalidConfigurationMachineError, errMachineSpec, err)
 	}
 	// Connect to Google compute.
-	svc, err := connectComputeService(cfg)
+	svc, err := connectComputeService(ctx, cfg)
 	if err != nil {
 		return newError(common.InvalidConfigurationMachineError, errConnect, err)
 	}
 	// Retrieve instance.
-	inst, err := p.get(machine)
+	inst, err := p.get(ctx, machine)
 	if err != nil {
 		if errors.Is(err, cloudprovidererrors.ErrInstanceNotFound) {
 			return nil
@@ -388,7 +361,7 @@ func (p *Provider) MigrateUID(_ context.Context, machine *clusterv1alpha1.Machin
 	if err != nil {
 		return newError(common.InvalidConfigurationMachineError, errSetLabels, err)
 	}
-	err = svc.waitZoneOperation(cfg, op.Name)
+	err = svc.waitZoneOperation(ctx, cfg, op.Name)
 	if err != nil {
 		return newError(common.InvalidConfigurationMachineError, errSetLabels, err)
 	}
@@ -396,7 +369,7 @@ func (p *Provider) MigrateUID(_ context.Context, machine *clusterv1alpha1.Machin
 }
 
 // SetMetricsForMachines allows providers to provide provider-specific metrics.
-func (p *Provider) SetMetricsForMachines(machines clusterv1alpha1.MachineList) error {
+func (p *Provider) SetMetricsForMachines(_ clusterv1alpha1.MachineList) error {
 	return nil
 }
 

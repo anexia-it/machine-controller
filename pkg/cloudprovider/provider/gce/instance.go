@@ -26,9 +26,9 @@ import (
 
 	"google.golang.org/api/compute/v1"
 
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/instance"
+	"k8c.io/machine-controller/pkg/cloudprovider/instance"
 
-	v1 "k8s.io/api/core/v1"
+	corev1 "k8s.io/api/core/v1"
 )
 
 // Possible instance statuses.
@@ -61,19 +61,22 @@ func (gi *googleInstance) ID() string {
 }
 
 func (gi *googleInstance) ProviderID() string {
+	if gi.ci == nil || gi.ci.Name == "" {
+		return ""
+	}
 	return fmt.Sprintf("gce://%s/%s/%s", gi.projectID, gi.zone, gi.ci.Name)
 }
 
 // Addresses implements instance.Instance.
-func (gi *googleInstance) Addresses() map[string]v1.NodeAddressType {
-	addrs := map[string]v1.NodeAddressType{}
+func (gi *googleInstance) Addresses() map[string]corev1.NodeAddressType {
+	addrs := map[string]corev1.NodeAddressType{}
 	for _, ifc := range gi.ci.NetworkInterfaces {
-		addrs[ifc.NetworkIP] = v1.NodeInternalIP
+		addrs[ifc.NetworkIP] = corev1.NodeInternalIP
 		for _, ac := range ifc.AccessConfigs {
-			addrs[ac.NatIP] = v1.NodeExternalIP
+			addrs[ac.NatIP] = corev1.NodeExternalIP
 		}
 		for _, ac := range ifc.Ipv6AccessConfigs {
-			addrs[ac.ExternalIpv6] = v1.NodeExternalIP
+			addrs[ac.ExternalIpv6] = corev1.NodeExternalIP
 		}
 	}
 
@@ -83,17 +86,17 @@ func (gi *googleInstance) Addresses() map[string]v1.NodeAddressType {
 	// Zonal DNS is present for newer projects and has the following FQDN format:
 	// [INSTANCE_NAME].[ZONE].c.[PROJECT_ID].internal
 	zonalDNS := fmt.Sprintf("%s.%s.c.%s.internal", gi.ci.Name, gi.zone, gi.projectID)
-	addrs[zonalDNS] = v1.NodeInternalDNS
+	addrs[zonalDNS] = corev1.NodeInternalDNS
 
 	// Global DNS is present for older projects and has the following FQDN format:
 	// [INSTANCE_NAME].c.[PROJECT_ID].internal
 	globalDNS := fmt.Sprintf("%s.c.%s.internal", gi.ci.Name, gi.projectID)
-	addrs[globalDNS] = v1.NodeInternalDNS
+	addrs[globalDNS] = corev1.NodeInternalDNS
 
 	// GCP provides the search paths to resolve the machine's name,
 	// so we add is as a DNS name
 	// https://cloud.google.com/compute/docs/internal-dns#resolv.conf
-	addrs[gi.ci.Name] = v1.NodeInternalDNS
+	addrs[gi.ci.Name] = corev1.NodeInternalDNS
 
 	return addrs
 }

@@ -19,21 +19,22 @@ package admission
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/Masterminds/semver/v3"
 	"golang.org/x/crypto/ssh"
 
-	"github.com/kubermatic/machine-controller/pkg/apis/cluster/common"
-	clusterv1alpha1 "github.com/kubermatic/machine-controller/pkg/apis/cluster/v1alpha1"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider"
-	controllerutil "github.com/kubermatic/machine-controller/pkg/controller/util"
-	"github.com/kubermatic/machine-controller/pkg/providerconfig"
-	providerconfigtypes "github.com/kubermatic/machine-controller/pkg/providerconfig/types"
+	"k8c.io/machine-controller/pkg/cloudprovider"
+	"k8c.io/machine-controller/sdk/apis/cluster/common"
+	clusterv1alpha1 "k8c.io/machine-controller/sdk/apis/cluster/v1alpha1"
+	"k8c.io/machine-controller/sdk/providerconfig"
+	"k8c.io/machine-controller/sdk/providerconfig/configvar"
+	"k8c.io/machine-controller/sdk/userdata"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
-	"k8s.io/klog"
+	ctrlruntimeclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // BypassSpecNoModificationRequirementAnnotation is used to bypass the "no machine.spec modification" allowed
@@ -48,7 +49,8 @@ func (ad *admissionData) mutateMachines(ctx context.Context, ar admissionv1.Admi
 	}
 
 	machineOriginal := machine.DeepCopy()
-	klog.V(3).Infof("Defaulting and validating machine %s/%s", machine.Namespace, machine.Name)
+	log := ad.log.With("machine", ctrlruntimeclient.ObjectKeyFromObject(&machine))
+	log.Debug("Defaulting and validating machine")
 
 	// Mutating .Spec is never allowed
 	// Only hidden exception: the machine-controller may set the .Spec.Name to .Metadata.Name
@@ -63,6 +65,16 @@ func (ad *admissionData) mutateMachines(ctx context.Context, ar admissionv1.Admi
 		if oldMachine.Spec.Name != machine.Spec.Name && machine.Spec.Name == machine.Name {
 			oldMachine.Spec.Name = machine.Spec.Name
 		}
+
+		if oldMachine.Spec.ProviderID != nil && machine.Spec.ProviderID != nil && *oldMachine.Spec.ProviderID != *machine.Spec.ProviderID {
+			return nil, fmt.Errorf("providerID is immutable")
+		}
+
+		// Allow mutation of the ProviderID field, as it can only be computed after the machine is created.
+		if oldMachine.Spec.ProviderID == nil && machine.Spec.ProviderID != nil {
+			oldMachine.Spec.ProviderID = machine.Spec.ProviderID
+		}
+
 		// Allow mutation when:
 		// * machine has the `MigrationBypassSpecNoModificationRequirementAnnotation` annotation (used for type migration)
 		bypassValidationForMigration := machine.Annotations[BypassSpecNoModificationRequirementAnnotation] == "true"
@@ -91,7 +103,7 @@ func (ad *admissionData) mutateMachines(ctx context.Context, ar admissionv1.Admi
 		common.SetKubeletFlags(&machine, map[common.KubeletFlags]string{
 			common.ExternalCloudProviderKubeletFlag: fmt.Sprintf("%t", ad.nodeSettings.ExternalCloudProvider),
 		})
-		providerConfig, err := providerconfigtypes.GetConfig(machine.Spec.ProviderSpec)
+		providerConfig, err := providerconfig.GetConfig(machine.Spec.ProviderSpec)
 		if err != nil {
 			return nil, err
 		}
@@ -102,18 +114,11 @@ func (ad *admissionData) mutateMachines(ctx context.Context, ar admissionv1.Admi
 		machine.Labels = make(map[string]string)
 	}
 
-	// Set LegacyMachineControllerUserDataLabel to false if external bootstrapping is expected for managing the machine configuration.
-	if ad.useExternalBootstrap {
-		machine.Labels[controllerutil.LegacyMachineControllerUserDataLabel] = "false"
-	} else {
-		machine.Labels[controllerutil.LegacyMachineControllerUserDataLabel] = "true"
-	}
-
-	return createAdmissionResponse(machineOriginal, &machine)
+	return createAdmissionResponse(log, machineOriginal, &machine)
 }
 
 func (ad *admissionData) defaultAndValidateMachineSpec(ctx context.Context, spec *clusterv1alpha1.MachineSpec) error {
-	providerConfig, err := providerconfigtypes.GetConfig(spec.ProviderSpec)
+	providerConfig, err := providerconfig.GetConfig(spec.ProviderSpec)
 	if err != nil {
 		return fmt.Errorf("failed to read machine.spec.providerSpec: %w", err)
 	}
@@ -126,20 +131,27 @@ func (ad *admissionData) defaultAndValidateMachineSpec(ctx context.Context, spec
 		}
 	}
 
-	skg := providerconfig.NewConfigVarResolver(ctx, ad.workerClient)
-	prov, err := cloudprovider.ForProvider(providerConfig.CloudProvider, skg)
+	// For KubeVirt we need to initialize the annotations for MachineDeployment, to enable setting of the needed annotations.
+	if providerConfig.CloudProvider == providerconfig.CloudProviderKubeVirt {
+		if spec.Annotations == nil {
+			spec.Annotations = make(map[string]string)
+		}
+	}
+
+	configResolver := configvar.NewResolver(ctx, ad.workerClient)
+	prov, err := cloudprovider.ForProvider(providerConfig.CloudProvider, configResolver)
 	if err != nil {
 		return fmt.Errorf("failed to get cloud provider %q: %w", providerConfig.CloudProvider, err)
 	}
 
 	// Verify operating system.
-	if _, err := ad.userDataManager.ForOS(providerConfig.OperatingSystem); err != nil {
+	if err := providerConfig.OperatingSystem.Validate(); err != nil {
 		return fmt.Errorf("failed to get OS '%s': %w", providerConfig.OperatingSystem, err)
 	}
 
 	// Check kubelet version
 	if spec.Versions.Kubelet == "" {
-		return fmt.Errorf("Kubelet version must be set")
+		return errors.New("kubelet version must be set")
 	}
 
 	kubeletVer, err := semver.NewVersion(spec.Versions.Kubelet)
@@ -158,14 +170,12 @@ func (ad *admissionData) defaultAndValidateMachineSpec(ctx context.Context, spec
 
 	// Validate SSH keys
 	if err := validatePublicKeys(providerConfig.SSHPublicKeys); err != nil {
-		return fmt.Errorf("Invalid public keys specified: %w", err)
+		return fmt.Errorf("invalid public keys specified: %w", err)
 	}
 
-	defaultedOperatingSystemSpec, err := providerconfig.DefaultOperatingSystemSpec(
+	defaultedOperatingSystemSpec, err := userdata.DefaultOperatingSystemSpec(
 		providerConfig.OperatingSystem,
-		providerConfig.CloudProvider,
 		providerConfig.OperatingSystemSpec,
-		ad.useExternalBootstrap,
 	)
 	if err != nil {
 		return err
@@ -177,13 +187,13 @@ func (ad *admissionData) defaultAndValidateMachineSpec(ctx context.Context, spec
 		return fmt.Errorf("failed to json marshal machine.spec.providerSpec: %w", err)
 	}
 
-	defaultedSpec, err := prov.AddDefaults(*spec)
+	defaultedSpec, err := prov.AddDefaults(ad.log, *spec)
 	if err != nil {
 		return fmt.Errorf("failed to default machineSpec: %w", err)
 	}
 	spec = &defaultedSpec
 
-	if err := prov.Validate(ctx, *spec); err != nil {
+	if err := prov.Validate(ctx, ad.log, *spec); err != nil {
 		return fmt.Errorf("validation failed: %w", err)
 	}
 

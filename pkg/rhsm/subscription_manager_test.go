@@ -22,6 +22,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"go.uber.org/zap"
 )
 
 var (
@@ -58,7 +60,7 @@ func TestDefaultRedHatSubscriptionManager_UnregisterInstance(t *testing.T) {
 			defer func() {
 				tt.testingServer.Close()
 			}()
-			manager := NewRedHatSubscriptionManager()
+			manager := NewRedHatSubscriptionManager(zap.NewNop().Sugar())
 			manager.(*defaultRedHatSubscriptionManager).apiURL = tt.testingServer.URL + apiPath
 			manager.(*defaultRedHatSubscriptionManager).authURL = tt.testingServer.URL
 			manager.(*defaultRedHatSubscriptionManager).requestsLimiter = tt.requestLimiter
@@ -75,6 +77,9 @@ func createTestingServer(pagination bool) *httptest.Server {
 		processedRequest = 1
 		result           string
 	)
+
+	const resultPrefix = "{\"pagination\": {\"offset\": 0, \"limit\": 2,\"count\": 5}, \"body\": ["
+
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case authPath:
@@ -84,17 +89,17 @@ func createTestingServer(pagination bool) *httptest.Server {
 			if pagination {
 				switch processedRequest {
 				case 1:
-					result = "{\"pagination\": {\"offset\": 0, \"limit\": 2,\"count\": 5}, \"body\": [" +
+					result = resultPrefix +
 						"{\"name\": \"test-machine-1\", \"uuid\": \"4a3ee8d7-337d-4cef-a20c-dda011f28f96\"}," +
 						"{\"name\": \"test-machine-2\", \"uuid\": \"4a3ee8d7-337d-4cef-a20c-dda011f28f91\"}" +
 						"]}"
 				case 2:
-					result = "{\"pagination\": {\"offset\": 0, \"limit\": 2,\"count\": 5}, \"body\": [" +
+					result = resultPrefix +
 						"{\"name\": \"test-machine-3\", \"uuid\": \"4a3ee8d7-337d-4cef-a20c-dda011f28f98\"}," +
 						"{\"name\": \"test-machine-4\", \"uuid\": \"4a3ee8d7-337d-4cef-a20c-dda011f28f95\"}" +
 						"]}"
 				case 3:
-					result = "{\"pagination\": {\"offset\": 0, \"limit\": 2,\"count\": 5}, \"body\": [" +
+					result = resultPrefix +
 						"{\"name\": \"test-machine-5\", \"uuid\": \"4a3ee8d7-337d-4cef-a20c-dda011f28f99\"}" +
 						"]}"
 				}

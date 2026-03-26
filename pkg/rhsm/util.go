@@ -17,9 +17,9 @@ limitations under the License.
 package rhsm
 
 import (
-	"github.com/kubermatic/machine-controller/pkg/apis/cluster/v1alpha1"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/types"
-	kuberneteshelper "github.com/kubermatic/machine-controller/pkg/kubernetes"
+	"k8c.io/machine-controller/pkg/cloudprovider/types"
+	kuberneteshelper "k8c.io/machine-controller/pkg/kubernetes"
+	clusterv1alpha1 "k8c.io/machine-controller/sdk/apis/cluster/v1alpha1"
 )
 
 const (
@@ -27,10 +27,10 @@ const (
 )
 
 // AddRHELSubscriptionFinalizer adds finalizer RedhatSubscriptionFinalizer to the machine object on rhel machine creation.
-func AddRHELSubscriptionFinalizer(machine *v1alpha1.Machine, update types.MachineUpdater) error {
+func AddRHELSubscriptionFinalizer(machine *clusterv1alpha1.Machine, update types.MachineUpdater) error {
 	if !kuberneteshelper.HasFinalizer(machine, RedhatSubscriptionFinalizer) {
-		if err := update(machine, func(m *v1alpha1.Machine) {
-			machine.Finalizers = append(m.Finalizers, RedhatSubscriptionFinalizer)
+		if err := update(machine, func(m *clusterv1alpha1.Machine) {
+			m.Finalizers = append(m.Finalizers, RedhatSubscriptionFinalizer)
 		}); err != nil {
 			return err
 		}
@@ -40,10 +40,10 @@ func AddRHELSubscriptionFinalizer(machine *v1alpha1.Machine, update types.Machin
 }
 
 // RemoveRHELSubscriptionFinalizer removes finalizer RedhatSubscriptionFinalizer to the machine object on rhel machine deletion.
-func RemoveRHELSubscriptionFinalizer(machine *v1alpha1.Machine, update types.MachineUpdater) error {
+func RemoveRHELSubscriptionFinalizer(machine *clusterv1alpha1.Machine, update types.MachineUpdater) error {
 	if kuberneteshelper.HasFinalizer(machine, RedhatSubscriptionFinalizer) {
-		if err := update(machine, func(m *v1alpha1.Machine) {
-			machine.Finalizers = kuberneteshelper.RemoveFinalizer(machine.Finalizers, RedhatSubscriptionFinalizer)
+		if err := update(machine, func(m *clusterv1alpha1.Machine) {
+			m.Finalizers = kuberneteshelper.RemoveFinalizer(m.Finalizers, RedhatSubscriptionFinalizer)
 		}); err != nil {
 			return err
 		}

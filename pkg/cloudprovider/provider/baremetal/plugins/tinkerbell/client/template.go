@@ -1,5 +1,5 @@
 /*
-Copyright 2021 The Machine Controller Authors.
+Copyright 2024 The Machine Controller Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,73 +20,275 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/tinkerbell/tink/protos/template"
+	tinkv1alpha1 "github.com/tinkerbell/tink/api/v1alpha1"
+	"gopkg.in/yaml.v3"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	ctrlruntimeclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// Template client for Tinkerbell.
+type Task struct {
+	Name        string            `json:"name"`
+	WorkerAddr  string            `json:"worker" yaml:"worker"`
+	Actions     []Action          `json:"actions"`
+	Volumes     []string          `json:"volumes,omitempty"`
+	Environment map[string]string `json:"environment,omitempty"`
+}
+
+// Action represents a workflow action.
+type Action struct {
+	Name        string            `json:"name,omitempty"`
+	Image       string            `json:"image,omitempty"`
+	Timeout     int64             `json:"timeout,omitempty"`
+	Volumes     []string          `json:"volumes,omitempty"`
+	Pid         string            `json:"pid,omitempty"`
+	Environment map[string]string `json:"environment,omitempty"`
+	Command     []string          `json:"command,omitempty"`
+}
 type Template struct {
-	client template.TemplateServiceClient
+	Version       string `yaml:"version"`
+	Name          string `yaml:"name"`
+	GlobalTimeout int64  `yaml:"global_timeout"`
+	Tasks         []Task `yaml:"tasks"`
 }
 
-// NewTemplateClient returns a Template client.
-func NewTemplateClient(client template.TemplateServiceClient) *Template {
-	return &Template{client: client}
+const (
+	fsType                      = "ext4"
+	defaultInterpreter          = "/bin/sh -c"
+	hardwareDisk1               = "{{ index .Hardware.Disks 0 }}"
+	hardwareName                = "{{.hardware_name}}"
+	ProvisionWorkerNodeTemplate = "provision-worker-node"
+	PartitionNumber             = "{{.partition_number}}"
+	OSImageURL                  = "{{.os_image}}"
+)
+
+// TemplateClient handles interactions with the Tinkerbell Templates in the Tinkerbell cluster.
+type TemplateClient struct {
+	tinkclient ctrlruntimeclient.Client
 }
 
-// Get returns a Tinkerbell Template.
-func (t *Template) Get(ctx context.Context, id, name string) (*template.WorkflowTemplate, error) {
-	req := &template.GetRequest{}
-	if id != "" {
-		req.GetBy = &template.GetRequest_Id{Id: id}
-	} else {
-		req.GetBy = &template.GetRequest_Name{Name: name}
+// NewTemplateClient creates a new client for managing Tinkerbell Templates.
+func NewTemplateClient(k8sClient ctrlruntimeclient.Client) *TemplateClient {
+	return &TemplateClient{
+		tinkclient: k8sClient,
+	}
+}
+
+func (t *TemplateClient) Delete(ctx context.Context, namespacedName types.NamespacedName) error {
+	template := &tinkv1alpha1.Template{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      namespacedName.Name,
+			Namespace: namespacedName.Namespace,
+		},
 	}
 
-	tinkTemplate, err := t.client.GetTemplate(ctx, req)
-	if err != nil {
-		if err.Error() == sqlErrorString || err.Error() == sqlErrorStringAlt {
-			return nil, fmt.Errorf("template %w", ErrNotFound)
+	if err := t.tinkclient.Delete(ctx, template); err != nil {
+		return fmt.Errorf("failed to delete Template in Tinkerbell cluster: %w", err)
+	}
+
+	return nil
+}
+
+// CreateTemplate creates a Tinkerbell Template in the Kubernetes cluster.
+func (t *TemplateClient) CreateTemplate(ctx context.Context, namespace string) error {
+	template := &tinkv1alpha1.Template{}
+	if err := t.tinkclient.Get(ctx, types.NamespacedName{
+		Name:      ProvisionWorkerNodeTemplate,
+		Namespace: namespace,
+	}, template); err != nil {
+		if apierrors.IsNotFound(err) {
+			data, err := getTemplate(OSImageURL)
+			if err != nil {
+				return err
+			}
+
+			template.Name = ProvisionWorkerNodeTemplate
+			template.Namespace = namespace
+			template.Spec = tinkv1alpha1.TemplateSpec{
+				Data: &data, // templateData is a string containing the YAML definition.
+			}
+
+			// Create the Template object in the Tinkerbell cluster
+			if err := t.tinkclient.Create(ctx, template); err != nil {
+				return fmt.Errorf("failed to create Template in Tinkerbell cluster: %w", err)
+			}
+
+			return nil
 		}
 
-		return nil, fmt.Errorf("getting template from Tinkerbell: %w", err)
-	}
-
-	return tinkTemplate, nil
-}
-
-// Update a Tinkerbell Template.
-func (t *Template) Update(ctx context.Context, template *template.WorkflowTemplate) error {
-	if _, err := t.client.UpdateTemplate(ctx, template); err != nil {
-		return fmt.Errorf("updating template in Tinkerbefll: %w", err)
+		return fmt.Errorf("failed to get template %s: %w", ProvisionWorkerNodeTemplate, err)
 	}
 
 	return nil
 }
 
-// Create a Tinkerbell Template.
-func (t *Template) Create(ctx context.Context, template *template.WorkflowTemplate) error {
-	resp, err := t.client.CreateTemplate(ctx, template)
+func getTemplate(osImageURL string) (string, error) {
+	actions := []Action{
+		createWipeDiskAction(),
+		createStreamUbuntuImageAction(hardwareDisk1, osImageURL),
+		createGrowPartitionAction(hardwareDisk1),
+		createNetworkConfigAction(),
+		configureCloudInitAction(),
+		decodeCloudInitFile(hardwareName),
+		createRebootAction(),
+	}
+
+	task := Task{
+		Name:       "os-installation",
+		WorkerAddr: "{{.device_1}}",
+		Volumes:    []string{"/dev:/dev", "/dev/console:/dev/console", "/lib/firmware:/lib/firmware:ro"},
+		Actions:    actions,
+	}
+
+	template := Template{
+		Name:          "ubuntu",
+		Version:       "0.1",
+		GlobalTimeout: 1800,
+		Tasks:         []Task{task},
+	}
+	yamlData, err := yaml.Marshal(template)
 	if err != nil {
-		return fmt.Errorf("creating template in Tinkerbell: %w", err)
+		return "", fmt.Errorf("error marshaling the template to YAML: %w", err)
 	}
 
-	template.Id = resp.GetId()
-
-	return nil
+	return string(yamlData), nil
 }
 
-// Delete a Tinkerbell Template.
-func (t *Template) Delete(ctx context.Context, id string) error {
-	req := &template.GetRequest{
-		GetBy: &template.GetRequest_Id{Id: id},
+func createWipeDiskAction() Action {
+	wipeScript := `apk add --no-cache util-linux
+disks="{{ .Hardware.Disks }}"
+disks=${disks:1:-1}
+for disk in $disks; do
+  for partition in $(ls ${disk}* 2>/dev/null); do
+    if [ -b "${partition}" ]; then
+      echo "Wiping ${partition}..."
+      wipefs -af "${partition}"
+    fi
+  done
+done
+echo "All partitions on ${disks} have been wiped."
+`
+	return Action{
+		Name:    "wipe-disk",
+		Image:   "alpine:3.23",
+		Timeout: 600,
+		Command: []string{"/bin/sh", "-c", wipeScript},
 	}
-	if _, err := t.client.DeleteTemplate(ctx, req); err != nil {
-		if err.Error() == sqlErrorString || err.Error() == sqlErrorStringAlt {
-			return fmt.Errorf("template %w", ErrNotFound)
-		}
+}
 
-		return fmt.Errorf("deleting template from Tinkerbell: %w", err)
+func createStreamUbuntuImageAction(destDisk, osImageURL string) Action {
+	return Action{
+		Name:    "stream-ubuntu-image",
+		Image:   "quay.io/tinkerbell-actions/image2disk:v1.0.0",
+		Timeout: 600,
+		Environment: map[string]string{
+			"DEST_DISK":  destDisk,
+			"IMG_URL":    osImageURL,
+			"COMPRESSED": "true",
+		},
 	}
+}
 
-	return nil
+func createGrowPartitionAction(destDisk string) Action {
+	return Action{
+		Name:    "grow-partition",
+		Image:   "quay.io/tinkerbell/actions/cexec:c5bde803d9f6c90f1a9d5e06930d856d1481854c",
+		Timeout: 90,
+		Environment: map[string]string{
+			"BLOCK_DEVICE":        "{{ formatPartition ( index .Hardware.Disks 0 ) (.partition_number | int) }}",
+			"FS_TYPE":             fsType,
+			"CHROOT":              "y",
+			"DEFAULT_INTERPRETER": defaultInterpreter,
+			"CMD_LINE":            fmt.Sprintf("growpart %s %s && resize2fs '{{ formatPartition ( index .Hardware.Disks 0 ) (.partition_number | int) }}'", destDisk, PartitionNumber),
+		},
+	}
+}
+
+func createNetworkConfigAction() Action {
+	netplanConfig := `
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    {{.interface_name}}:
+      dhcp4: no
+      addresses:
+        - {{.cidr}}
+      nameservers:
+        addresses:
+          - {{.ns}}
+      routes:
+      - to: default
+        via: {{.default_route}}`
+	return Action{
+		Name:    "add-netplan-config",
+		Image:   "quay.io/tinkerbell-actions/writefile:v1.0.0",
+		Timeout: 90,
+		Environment: map[string]string{
+			"DEST_DISK": "{{ formatPartition ( index .Hardware.Disks 0 ) (.partition_number | int) }}",
+			"FS_TYPE":   fsType,
+			"DEST_PATH": "/etc/netplan/config.yaml",
+			"CONTENTS":  netplanConfig,
+			"UID":       "0",
+			"GID":       "0",
+			"MODE":      "0644",
+			"DIRMODE":   "0755",
+		},
+	}
+}
+
+func configureCloudInitAction() Action {
+	commands := `mkdir -p /var/lib/cloud/seed/nocloud && chmod 755 /var/lib/cloud/seed/nocloud
+echo 'datasource_list: [ NoCloud ]' > /etc/cloud/cloud.cfg.d/01_ds-identify.cfg
+echo '{{.cloud_init_script}}' > /tmp/{{.hardware_name}}-bootstrap-config
+echo 'instance-id: {{.hardware_name}}' > /var/lib/cloud/seed/nocloud/meta-data
+echo 'local-hostname: {{.hardware_name}}' >> /var/lib/cloud/seed/nocloud/meta-data
+`
+
+	return Action{
+		Name:    "configure-cloud-init",
+		Image:   "quay.io/tinkerbell-actions/cexec:v1.0.0",
+		Timeout: 90,
+		Environment: map[string]string{
+			"BLOCK_DEVICE":        "{{ formatPartition ( index .Hardware.Disks 0 ) (.partition_number | int) }}",
+			"FS_TYPE":             fsType,
+			"CHROOT":              "y",
+			"DEFAULT_INTERPRETER": defaultInterpreter,
+			"CMD_LINE":            commands,
+		},
+	}
+}
+
+func decodeCloudInitFile(hardwareName string) Action {
+	return Action{
+		Name:    "decode-cloud-init-file",
+		Image:   "quay.io/tinkerbell/actions/cexec:latest",
+		Timeout: 90,
+		Environment: map[string]string{
+			"BLOCK_DEVICE":        "{{ formatPartition ( index .Hardware.Disks 0 ) (.partition_number | int) }}",
+			"FS_TYPE":             fsType,
+			"CHROOT":              "y",
+			"DEFAULT_INTERPRETER": "/bin/sh -c",
+			"CMD_LINE":            fmt.Sprintf("cat /tmp/%s-bootstrap-config | base64 -d > '/var/lib/cloud/seed/nocloud/user-data'", hardwareName),
+		},
+	}
+}
+
+func createRebootAction() Action {
+	return Action{
+		Name:    "reboot-action",
+		Image:   "ghcr.io/jacobweinstock/waitdaemon:0.1.1",
+		Pid:     "host",
+		Timeout: 90,
+		Command: []string{"reboot"},
+		Environment: map[string]string{
+			"IMAGE":        "alpine",
+			"WAIT_SECONDS": "10",
+		},
+		Volumes: []string{
+			"/var/run/docker.sock:/var/run/docker.sock",
+		},
+	}
 }

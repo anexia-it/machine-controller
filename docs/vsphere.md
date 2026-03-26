@@ -27,7 +27,7 @@ To see where to locate the OVAs go to the OS specific section.
 3. Click through the dialog until "Select storage"
 4. Select the same storage you want to use for your machines
 5. Select the same network you want to use for your machines
-6. Leave everyhting in the "Customize Template" and "Ready to complete" dialog as it is
+6. Leave everything in the "Customize Template" and "Ready to complete" dialog as it is
 7. Wait until the VM got fully imported and the "Snapshots" => "Create Snapshot" button is not grayed out anymore
 
 #### Command-line procedure
@@ -154,7 +154,7 @@ Procedure:
 
     ```
     # The URL below is just an example
-    image_url="https://cloud.centos.org/centos/7/images/CentOS-7-x86_64-GenericCloud.qcow2"
+    image_url="https://cloud-images.ubuntu.com/releases/20.04/release/ubuntu-20.04-server-cloudimg-amd64.img"
     image_name="$(basename -- "${image_url}" | sed 's/.qcow2$//g')"
     curl -sL "${image_url}" -O .
     ```
@@ -168,7 +168,7 @@ Procedure:
 3. Upload to vSphere using WebUI or GOVC:
 
     Make sure to replace the parameters on the command below with the correct
-    values specific to yout vSphere environment.
+    values specific to your vSphere environment.
 
     ```
     govc import.vmdk -dc=dc-1 -pool=/dc-1/host/cl-1/Resources -ds=ds-1 "./${image_name}.vmdk"
@@ -203,12 +203,6 @@ Red Hat Enterprise Linux 8.x KVM Guest Image can be found at [Red Hat Customer P
 
 Follow [qcow2](#create-template-vm-from-qcow2) template VM creation guide.
 
-#### CentOS
-
-CentOS 7 image can be found at the following link: <https://cloud.centos.org/centos/7/images/CentOS-7-x86_64-GenericCloud.qcow2r>.
-
-Follow [qcow2](#create-template-vm-from-qcow2) template VM creation guide.
-
 ## Provider configuration
 
 VSphere provider accepts the following configuration parameters:
@@ -226,7 +220,8 @@ datacenter: datacenter1
 # VM template name
 templateVMName: ubuntu-template
 # Optional. Sets the networks on the VM. If no network is specified, the template default will be used.
-vmNetName: network1
+networks:
+- network1
 # Optional
 folder: folder1
 # Optional: Force VMs to be provisoned to the specified resourcePool

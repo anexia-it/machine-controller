@@ -25,9 +25,8 @@ import (
 	"net/http"
 	"time"
 
+	"go.uber.org/zap"
 	"golang.org/x/oauth2"
-
-	"k8s.io/klog"
 )
 
 const defaultTimeout = 10 * time.Second
@@ -54,6 +53,7 @@ type systemsResponse struct {
 }
 
 type defaultRedHatSubscriptionManager struct {
+	log             *zap.SugaredLogger
 	apiURL          string
 	authURL         string
 	requestsLimiter int
@@ -61,8 +61,9 @@ type defaultRedHatSubscriptionManager struct {
 
 var errUnauthenticatedRequest = errors.New("unauthenticated")
 
-func NewRedHatSubscriptionManager() RedHatSubscriptionManager {
+func NewRedHatSubscriptionManager(log *zap.SugaredLogger) RedHatSubscriptionManager {
 	return &defaultRedHatSubscriptionManager{
+		log:             log,
 		apiURL:          "https://api.access.redhat.com/management/v1/systems",
 		authURL:         "https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token",
 		requestsLimiter: 100,
@@ -102,18 +103,20 @@ func (d *defaultRedHatSubscriptionManager) UnregisterInstance(ctx context.Contex
 			return fmt.Errorf("failed to find system profile: %w", err)
 		}
 
+		machineLog := d.log.With("uuid", machineUUID)
+
 		if machineUUID == "" {
-			klog.Infof("machine uuid %s is not found", machineUUID)
+			machineLog.Info("Machine UUID was not found")
 			return nil
 		}
 
 		err = d.deleteSubscription(ctx, machineUUID, offlineToken)
 		if err == nil {
-			klog.Infof("subscription for vm %v has been deleted successfully", machineUUID)
+			machineLog.Info("Subscription for VM has been deleted successfully")
 			return nil
 		}
 
-		klog.Errorf("failed to delete subscription for system: %s due to: %v", machineUUID, err)
+		machineLog.Errorw("Failed to delete subscription for system:", zap.Error(err))
 		time.Sleep(2 * time.Second)
 		retries++
 	}
@@ -142,13 +145,12 @@ func (d *defaultRedHatSubscriptionManager) findSystemsProfile(ctx context.Contex
 		offset += len(systemsInfo.Body)
 	}
 
-	klog.Infof("no machine name %s is found", name)
 	return "", nil
 }
 
 func (d *defaultRedHatSubscriptionManager) deleteSubscription(ctx context.Context, uuid, offlineToken string) error {
 	client := newOAuthClientWithRefreshToken(ctx, offlineToken, d.authURL)
-	req, err := http.NewRequest("DELETE", fmt.Sprintf("%s/%s", d.apiURL, uuid), nil)
+	req, err := http.NewRequestWithContext(ctx, "DELETE", fmt.Sprintf("%s/%s", d.apiURL, uuid), nil)
 	if err != nil {
 		return fmt.Errorf("failed to create delete system request: %w", err)
 	}
@@ -177,7 +179,7 @@ func (d *defaultRedHatSubscriptionManager) deleteSubscription(ctx context.Contex
 
 func (d *defaultRedHatSubscriptionManager) executeFindSystemsRequest(ctx context.Context, offlineToken string, offset int) (*systemsResponse, error) {
 	client := newOAuthClientWithRefreshToken(ctx, offlineToken, d.authURL)
-	req, err := http.NewRequest("GET", fmt.Sprintf(d.apiURL+"?limit=%v&offset=%v", d.requestsLimiter, offset), nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf(d.apiURL+"?limit=%v&offset=%v", d.requestsLimiter, offset), nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create fetch systems request: %w", err)
 	}

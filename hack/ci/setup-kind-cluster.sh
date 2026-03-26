@@ -131,7 +131,7 @@ EOF
 
   # unwrap the socket inside the kind cluster and make it available on a TCP port,
   # because containerd/Docker doesn't support sockets for mirrors.
-  docker exec $KIND_CLUSTER_NAME-control-plane bash -c 'socat TCP4-LISTEN:5001,fork,reuseaddr UNIX:/mirror/mirror.sock &'
+  docker exec $KIND_CLUSTER_NAME-control-plane bash -c 'apt update --quiet; apt install --quiet socat; socat TCP4-LISTEN:5001,fork,reuseaddr UNIX:/mirror/mirror.sock &'
 else
   kind create cluster --config kind-config.yaml
 fi
@@ -150,22 +150,9 @@ if [ -z "${DISABLE_CLUSTER_EXPOSER:-}" ]; then
 
   # Start cluster exposer, which will expose services from within kind as
   # a NodePort service on the host
-  echodate "Starting cluster exposer"
-  (
-    # Clone kubermatic repo to build clusterexposer
-    mkdir -p /tmp/kubermatic
-    cd /tmp/kubermatic
-    echodate "Cloning cluster exposer"
-    KKP_REPO_URL="${KKP_REPO_URL:-https://github.com/kubermatic/kubermatic.git}"
-    KKP_REPO_TAG="${KKP_REPO_BRANCH:-main}"
-    git clone --depth 1 --branch "${KKP_REPO_TAG}" "${KKP_REPO_URL}" .
-
-    echodate "Building cluster exposer"
-    CGO_ENABLED=0 go build --tags ce -v -o /tmp/clusterexposer ./pkg/test/clusterexposer/cmd
-  )
-
   export KUBECONFIG=~/.kube/config
-  /tmp/clusterexposer \
+  echodate "Starting cluster exposer"
+  clusterexposer \
     --kubeconfig-inner "$KUBECONFIG" \
     --kubeconfig-outer "/etc/kubeconfig/kubeconfig" \
     --build-id "$PROW_JOB_ID" &> /var/log/clusterexposer.log &
@@ -199,12 +186,15 @@ if [ -z "${DISABLE_CLUSTER_EXPOSER:-}" ]; then
 
   echodate "Successfully set up iptables rules for nodeports"
 
+  # Wait for 10 seconds before checking if the apiserver is reachable.
+  sleep 10
+
   # Compute external kube-apiserver address
   # If svc is not found then we need to check cluster-exposer logs
   PORT=$(kubectl --kubeconfig /etc/kubeconfig/kubeconfig get svc -l prow.k8s.io/id=$PROW_JOB_ID -o jsonpath="{.items..spec.ports[0].nodePort}")
 
-  if [ -z "$PORT" ] || [ -z "$NODE_NAME" ] || [ -z "$NODE_IP" ]; then
-    echodate "This script was unable to determine the external IP for kube-apiserver."
+  if [ -z "$PORT" ]; then
+    echodate "This script was unable to determine the nodeport for kube-apiserver."
     exit 1
   fi
 

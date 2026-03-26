@@ -29,7 +29,7 @@ import (
 	"github.com/vmware/govmomi/vim25"
 	"github.com/vmware/govmomi/vim25/soap"
 
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/util"
+	"k8c.io/machine-controller/pkg/cloudprovider/util"
 
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 )
@@ -47,9 +47,6 @@ type RESTSession struct {
 // NewSession creates a vCenter client with initialized finder.
 func NewSession(ctx context.Context, config *Config) (*Session, error) {
 	vim25Client, err := createVim25Client(ctx, config)
-	if err != nil {
-		return nil, err
-	}
 	if err != nil {
 		return nil, err
 	}
@@ -109,10 +106,12 @@ func (s *RESTSession) Logout(ctx context.Context) {
 }
 
 func createVim25Client(ctx context.Context, config *Config) (*vim25.Client, error) {
-	clientURL, err := url.Parse(fmt.Sprintf("%s/sdk", config.VSphereURL))
+	endpointURL, err := url.Parse(config.VSphereURL)
 	if err != nil {
 		return nil, err
 	}
+
+	clientURL := endpointURL.JoinPath("/sdk")
 
 	// creating the govmoni Client in roundabout way because we need to set the proper CA bundle: reference https://github.com/vmware/govmomi/issues/1200
 	soapClient := soap.NewClient(clientURL, config.AllowInsecure)

@@ -19,28 +19,30 @@ package cloudprovider
 import (
 	"errors"
 
-	cloudprovidercache "github.com/kubermatic/machine-controller/pkg/cloudprovider/cache"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/provider/alibaba"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/provider/anexia"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/provider/aws"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/provider/azure"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/provider/baremetal"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/provider/digitalocean"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/provider/equinixmetal"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/provider/fake"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/provider/gce"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/provider/hetzner"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/provider/kubevirt"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/provider/linode"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/provider/nutanix"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/provider/openstack"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/provider/scaleway"
-	vcd "github.com/kubermatic/machine-controller/pkg/cloudprovider/provider/vmwareclouddirector"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/provider/vsphere"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/provider/vultr"
-	cloudprovidertypes "github.com/kubermatic/machine-controller/pkg/cloudprovider/types"
-	"github.com/kubermatic/machine-controller/pkg/providerconfig"
-	providerconfigtypes "github.com/kubermatic/machine-controller/pkg/providerconfig/types"
+	cloudprovidercache "k8c.io/machine-controller/pkg/cloudprovider/cache"
+	"k8c.io/machine-controller/pkg/cloudprovider/provider/alibaba"
+	"k8c.io/machine-controller/pkg/cloudprovider/provider/anexia"
+	"k8c.io/machine-controller/pkg/cloudprovider/provider/aws"
+	"k8c.io/machine-controller/pkg/cloudprovider/provider/azure"
+	"k8c.io/machine-controller/pkg/cloudprovider/provider/baremetal"
+	"k8c.io/machine-controller/pkg/cloudprovider/provider/digitalocean"
+	"k8c.io/machine-controller/pkg/cloudprovider/provider/edge"
+	"k8c.io/machine-controller/pkg/cloudprovider/provider/equinixmetal"
+	"k8c.io/machine-controller/pkg/cloudprovider/provider/external"
+	"k8c.io/machine-controller/pkg/cloudprovider/provider/fake"
+	"k8c.io/machine-controller/pkg/cloudprovider/provider/gce"
+	"k8c.io/machine-controller/pkg/cloudprovider/provider/hetzner"
+	"k8c.io/machine-controller/pkg/cloudprovider/provider/kubevirt"
+	"k8c.io/machine-controller/pkg/cloudprovider/provider/linode"
+	"k8c.io/machine-controller/pkg/cloudprovider/provider/nutanix"
+	"k8c.io/machine-controller/pkg/cloudprovider/provider/opennebula"
+	"k8c.io/machine-controller/pkg/cloudprovider/provider/openstack"
+	"k8c.io/machine-controller/pkg/cloudprovider/provider/scaleway"
+	vcd "k8c.io/machine-controller/pkg/cloudprovider/provider/vmwareclouddirector"
+	"k8c.io/machine-controller/pkg/cloudprovider/provider/vsphere"
+	"k8c.io/machine-controller/pkg/cloudprovider/provider/vultr"
+	cloudprovidertypes "k8c.io/machine-controller/pkg/cloudprovider/types"
+	"k8c.io/machine-controller/sdk/providerconfig"
 )
 
 var (
@@ -49,75 +51,92 @@ var (
 	// ErrProviderNotFound tells that the requested cloud provider was not found.
 	ErrProviderNotFound = errors.New("cloudprovider not found")
 
-	providers = map[providerconfigtypes.CloudProvider]func(cvr *providerconfig.ConfigVarResolver) cloudprovidertypes.Provider{
-		providerconfigtypes.CloudProviderDigitalocean: func(cvr *providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
+	providers = map[providerconfig.CloudProvider]func(cvr providerconfig.ConfigVarResolver) cloudprovidertypes.Provider{
+		providerconfig.CloudProviderDigitalocean: func(cvr providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
 			return digitalocean.New(cvr)
 		},
-		providerconfigtypes.CloudProviderAWS: func(cvr *providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
+		providerconfig.CloudProviderAWS: func(cvr providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
 			return aws.New(cvr)
 		},
-		providerconfigtypes.CloudProviderOpenstack: func(cvr *providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
+		providerconfig.CloudProviderOpenstack: func(cvr providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
 			return openstack.New(cvr)
 		},
-		providerconfigtypes.CloudProviderGoogle: func(cvr *providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
+		providerconfig.CloudProviderGoogle: func(cvr providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
 			return gce.New(cvr)
 		},
-		providerconfigtypes.CloudProviderHetzner: func(cvr *providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
+		providerconfig.CloudProviderHetzner: func(cvr providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
 			return hetzner.New(cvr)
 		},
-		providerconfigtypes.CloudProviderLinode: func(cvr *providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
-			return linode.New(cvr)
-		},
-		providerconfigtypes.CloudProviderVsphere: func(cvr *providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
+		providerconfig.CloudProviderVsphere: func(cvr providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
 			return vsphere.New(cvr)
 		},
-		providerconfigtypes.CloudProviderAzure: func(cvr *providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
+		providerconfig.CloudProviderAzure: func(cvr providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
 			return azure.New(cvr)
 		},
-		providerconfigtypes.CloudProviderEquinixMetal: func(cvr *providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
+		providerconfig.CloudProviderEquinixMetal: func(cvr providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
 			return equinixmetal.New(cvr)
-		},
-		providerconfigtypes.CloudProviderVultr: func(cvr *providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
-			return vultr.New(cvr)
 		},
 		// NB: This is explicitly left to allow old Packet machines to be deleted.
 		// We can handle those machines in the same way as Equinix Metal machines
 		// because there are no API changes.
 		// TODO: Remove this after deprecation period.
-		providerconfigtypes.CloudProviderPacket: func(cvr *providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
+		providerconfig.CloudProviderPacket: func(cvr providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
 			return equinixmetal.New(cvr)
 		},
-		providerconfigtypes.CloudProviderFake: func(cvr *providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
+		providerconfig.CloudProviderFake: func(cvr providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
 			return fake.New(cvr)
 		},
-		providerconfigtypes.CloudProviderKubeVirt: func(cvr *providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
+		providerconfig.CloudProviderEdge: func(cvr providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
+			return edge.New(cvr)
+		},
+		providerconfig.CloudProviderKubeVirt: func(cvr providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
 			return kubevirt.New(cvr)
 		},
-		providerconfigtypes.CloudProviderAlibaba: func(cvr *providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
+		providerconfig.CloudProviderAlibaba: func(cvr providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
 			return alibaba.New(cvr)
 		},
-		providerconfigtypes.CloudProviderScaleway: func(cvr *providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
+		providerconfig.CloudProviderScaleway: func(cvr providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
 			return scaleway.New(cvr)
 		},
-		providerconfigtypes.CloudProviderAnexia: func(cvr *providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
+		providerconfig.CloudProviderAnexia: func(cvr providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
 			return anexia.New(cvr)
 		},
-		providerconfigtypes.CloudProviderBaremetal: func(cvr *providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
+		providerconfig.CloudProviderBaremetal: func(cvr providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
 			// TODO(MQ): add a baremetal driver.
 			return baremetal.New(cvr)
 		},
-		providerconfigtypes.CloudProviderNutanix: func(cvr *providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
+		providerconfig.CloudProviderNutanix: func(cvr providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
 			return nutanix.New(cvr)
 		},
-		providerconfigtypes.CloudProviderVMwareCloudDirector: func(cvr *providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
+		providerconfig.CloudProviderVMwareCloudDirector: func(cvr providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
 			return vcd.New(cvr)
+		},
+		providerconfig.CloudProviderExternal: func(cvr providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
+			return external.New(cvr)
+		},
+	}
+
+	// communityProviders holds a map of cloud providers that have been implemented by community members and
+	// contributed to machine-controller. They are not end-to-end tested by the machine-controller development team.
+	communityProviders = map[providerconfig.CloudProvider]func(cvr providerconfig.ConfigVarResolver) cloudprovidertypes.Provider{
+		providerconfig.CloudProviderLinode: func(cvr providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
+			return linode.New(cvr)
+		},
+		providerconfig.CloudProviderVultr: func(cvr providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
+			return vultr.New(cvr)
+		},
+		providerconfig.CloudProviderOpenNebula: func(cvr providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
+			return opennebula.New(cvr)
 		},
 	}
 )
 
 // ForProvider returns a CloudProvider actuator for the requested provider.
-func ForProvider(p providerconfigtypes.CloudProvider, cvr *providerconfig.ConfigVarResolver) (cloudprovidertypes.Provider, error) {
+func ForProvider(p providerconfig.CloudProvider, cvr providerconfig.ConfigVarResolver) (cloudprovidertypes.Provider, error) {
 	if p, found := providers[p]; found {
+		return NewValidationCacheWrappingCloudProvider(p(cvr)), nil
+	}
+	if p, found := communityProviders[p]; found {
 		return NewValidationCacheWrappingCloudProvider(p(cvr)), nil
 	}
 	return nil, ErrProviderNotFound

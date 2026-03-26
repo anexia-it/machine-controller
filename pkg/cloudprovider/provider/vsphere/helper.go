@@ -22,7 +22,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"math"
 	"os"
 	"os/exec"
 	"text/template"
@@ -32,20 +31,20 @@ import (
 	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/soap"
 	"github.com/vmware/govmomi/vim25/types"
-
-	providerconfigtypes "github.com/kubermatic/machine-controller/pkg/providerconfig/types"
+	"go.uber.org/zap"
 
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	"k8s.io/klog"
 )
 
 const (
 	localTempDir     = "/tmp"
 	metaDataTemplate = `instance-id: {{ .InstanceID}}
 local-hostname: {{ .Hostname }}`
+
+	gigaByte = (1024 * 1024 * 1024)
 )
 
-func createClonedVM(ctx context.Context, vmName string, config *Config, session *Session, os providerconfigtypes.OperatingSystem, containerLinuxUserdata string) (*object.VirtualMachine, error) {
+func createClonedVM(ctx context.Context, log *zap.SugaredLogger, vmName string, config *Config, session *Session, containerLinuxUserdata string) (*object.VirtualMachine, error) {
 	tpl, err := session.Finder.VirtualMachine(ctx, config.TemplateVMName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get template vm: %w", err)
@@ -82,12 +81,12 @@ func createClonedVM(ctx context.Context, vmName string, config *Config, session 
 		Template: false,
 		Location: relocateSpec,
 	}
-	datastoreref, err := resolveDatastoreRef(ctx, config, session, tpl, targetVMFolder, &cloneSpec)
+	datastoreref, err := resolveDatastoreRef(ctx, log, config, session, tpl, targetVMFolder, &cloneSpec)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve datastore: %w", err)
 	}
 
-	resourcepoolref, err := resolveResourcePoolRef(ctx, config, session, tpl)
+	resourcepoolref, err := resolveResourcePoolRef(ctx, config, session)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve resourcePool: %w", err)
 	}
@@ -102,15 +101,13 @@ func createClonedVM(ctx context.Context, vmName string, config *Config, session 
 		return nil, fmt.Errorf("failed to clone template vm: %w", err)
 	}
 
-	if err := clonedVMTask.Wait(ctx); err != nil {
+	if err := clonedVMTask.WaitEx(ctx); err != nil {
 		return nil, fmt.Errorf("error when waiting for result of clone task: %w", err)
 	}
-
 	virtualMachine, err := session.Finder.VirtualMachine(ctx, vmName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get virtual machine object after cloning: %w", err)
 	}
-
 	vmDevices, err := virtualMachine.Device(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list devices of template VM: %w", err)
@@ -140,7 +137,6 @@ func createClonedVM(ctx context.Context, vmName string, config *Config, session 
 
 		guestInfoUserData = "guestinfo.ignition.config.data"
 		guestInfoUserDataEncoding = "guestinfo.ignition.config.data.encoding"
-
 		for _, item := range mvm.Config.VAppConfig.GetVmConfigInfo().Property {
 			switch item.Id {
 			case guestInfoUserData:
@@ -172,7 +168,6 @@ func createClonedVM(ctx context.Context, vmName string, config *Config, session 
 	}
 
 	diskUUIDEnabled := true
-
 	var deviceSpecs []types.BaseVirtualDeviceConfigSpec
 	if config.DiskSizeGB != nil {
 		disks, err := getDisksFromVM(ctx, virtualMachine)
@@ -185,15 +180,15 @@ func createClonedVM(ctx context.Context, vmName string, config *Config, session 
 			return nil, err
 		}
 
-		klog.V(4).Infof("Increasing disk size to %d GB", *config.DiskSizeGB)
+		log.Debugw("Increasing disk size", "targetgb", *config.DiskSizeGB)
 		disk := disks[0]
-		disk.CapacityInBytes = *config.DiskSizeGB * int64(math.Pow(1024, 3))
+		disk.CapacityInBytes = *config.DiskSizeGB * gigaByte
 		diskspec := &types.VirtualDeviceConfigSpec{Operation: types.VirtualDeviceConfigSpecOperationEdit, Device: disk}
 		deviceSpecs = append(deviceSpecs, diskspec)
 	}
 
-	if config.VMNetName != "" {
-		networkSpecs, err := GetNetworkSpecs(ctx, session, vmDevices, config.VMNetName)
+	if config.VMNetName != "" || len(config.Networks) > 0 {
+		networkSpecs, err := GetNetworkSpecs(ctx, session, vmDevices, config.VMNetName, config.Networks)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get network specifications: %w", err)
 		}
@@ -213,7 +208,7 @@ func createClonedVM(ctx context.Context, vmName string, config *Config, session 
 	if err != nil {
 		return nil, fmt.Errorf("failed to reconfigure the VM: %w", err)
 	}
-	if err := reconfigureTask.Wait(ctx); err != nil {
+	if err := reconfigureTask.WaitEx(ctx); err != nil {
 		return nil, fmt.Errorf("error when waiting for result of the reconfigure task: %w", err)
 	}
 
@@ -223,14 +218,15 @@ func createClonedVM(ctx context.Context, vmName string, config *Config, session 
 	if err := removeFloppyDevice(ctx, virtualMachine); err != nil {
 		return nil, fmt.Errorf("failed to remove floppy device: %w", err)
 	}
-
 	return virtualMachine, nil
 }
 
-func resolveDatastoreRef(ctx context.Context, config *Config, session *Session, vm *object.VirtualMachine, folder *object.Folder, cloneSpec *types.VirtualMachineCloneSpec) (*types.ManagedObjectReference, error) {
+func resolveDatastoreRef(ctx context.Context, log *zap.SugaredLogger, config *Config, session *Session, vm *object.VirtualMachine, folder *object.Folder, cloneSpec *types.VirtualMachineCloneSpec) (*types.ManagedObjectReference, error) {
 	// Based on https://github.com/vmware/govmomi/blob/v0.22.1/govc/vm/clone.go#L358
 	if config.DatastoreCluster != "" && config.Datastore == "" {
-		klog.Infof("Choosing initial datastore placement for vm %s from datastore cluster %s", vm.Name(), config.DatastoreCluster)
+		vmLog := log.With("vm", vm.Name(), "datastorecluster", config.DatastoreCluster)
+		vmLog.Infow("Choosing initial datastore placement for vm from datastore cluster")
+
 		storagePod, err := session.Finder.DatastoreCluster(ctx, config.DatastoreCluster)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get datastore cluster: %w", err)
@@ -273,7 +269,8 @@ func resolveDatastoreRef(ctx context.Context, config *Config, session *Session, 
 
 		// Get the first recommendation
 		ds := recommendations[0].Action[0].(*types.StoragePlacementAction).Destination.Reference()
-		klog.Infof("The selected datastore from datastore cluster %s is: %v", config.DatastoreCluster, ds)
+		vmLog.Infow("Selected datastore from datastore cluster", "datastore", ds)
+
 		return &ds, nil
 	} else if config.DatastoreCluster == "" && config.Datastore != "" {
 		datastore, err := session.Finder.Datastore(ctx, config.Datastore)
@@ -281,12 +278,11 @@ func resolveDatastoreRef(ctx context.Context, config *Config, session *Session, 
 			return nil, fmt.Errorf("failed to get datastore: %w", err)
 		}
 		return types.NewReference(datastore.Reference()), nil
-	} else {
-		return nil, fmt.Errorf("please provide either a datastore or a datastore cluster")
 	}
+	return nil, fmt.Errorf("please provide either a datastore or a datastore cluster")
 }
 
-func uploadAndAttachISO(ctx context.Context, session *Session, vmRef *object.VirtualMachine, localIsoFilePath string) error {
+func uploadAndAttachISO(ctx context.Context, log *zap.SugaredLogger, session *Session, vmRef *object.VirtualMachine, localIsoFilePath string) error {
 	p := soap.DefaultUpload
 	remoteIsoFilePath := fmt.Sprintf("%s/%s", vmRef.Name(), "cloud-init.iso")
 	// Get the datastore where VM files are located
@@ -294,11 +290,12 @@ func uploadAndAttachISO(ctx context.Context, session *Session, vmRef *object.Vir
 	if err != nil {
 		return fmt.Errorf("error getting datastore from VM %s: %w", vmRef.Name(), err)
 	}
-	klog.V(3).Infof("Uploading userdata ISO to datastore %+v, destination iso is %s\n", datastore, remoteIsoFilePath)
+	uploadLog := log.With("datastore", datastore, "source", localIsoFilePath, "destination", remoteIsoFilePath)
+	uploadLog.Debug("Uploading userdata ISO to datastore")
 	if err := datastore.UploadFile(ctx, localIsoFilePath, remoteIsoFilePath, &p); err != nil {
 		return fmt.Errorf("failed to upload iso: %w", err)
 	}
-	klog.V(3).Infof("Uploaded ISO file %s", localIsoFilePath)
+	uploadLog.Debug("Uploaded ISO file")
 
 	// Find the cd-rom device and insert the cloud init iso file into it.
 	devices, err := vmRef.Device(ctx)
@@ -316,7 +313,7 @@ func uploadAndAttachISO(ctx context.Context, session *Session, vmRef *object.Vir
 	return vmRef.EditDevice(ctx, devices.InsertIso(cdrom, iso))
 }
 
-func generateLocalUserdataISO(userdata, name string) (string, error) {
+func generateLocalUserdataISO(ctx context.Context, userdata, name string) (string, error) {
 	// We must create a directory, because the iso-generation commands
 	// take a directory as input
 	userdataDir, err := os.MkdirTemp(localTempDir, name)
@@ -370,7 +367,7 @@ func generateLocalUserdataISO(userdata, name string) (string, error) {
 		return "", errors.New("system is missing genisoimage or mkisofs, can't generate userdata iso without it")
 	}
 
-	cmd := exec.Command(command, args...)
+	cmd := exec.CommandContext(ctx, command, args...)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("error executing command `%s %s`: output: `%s`, error: `%w`", command, args, string(output), err)
 	}
@@ -422,9 +419,9 @@ func validateDiskResizing(disks []*types.VirtualDisk, requestedSize int64) error
 	if diskLen := len(disks); diskLen != 1 {
 		return fmt.Errorf("expected vm to have exactly one disk, got %d", diskLen)
 	}
-	requestedCapacityInBytes := requestedSize * int64(math.Pow(1024, 3))
+	requestedCapacityInBytes := requestedSize * gigaByte
 	if requestedCapacityInBytes < disks[0].CapacityInBytes {
-		attachedDiskSizeInGiB := disks[0].CapacityInBytes / int64(math.Pow(1024, 3))
+		attachedDiskSizeInGiB := disks[0].CapacityInBytes / gigaByte
 		return fmt.Errorf("requested diskSizeGB %d is smaller than size of attached disk(%dGiB)", requestedSize, attachedDiskSizeInGiB)
 	}
 	return nil
@@ -435,17 +432,17 @@ func getDatastoreFromVM(ctx context.Context, session *Session, vmRef *object.Vir
 	var props mo.VirtualMachine
 	// Obtain VM properties
 	if err := vmRef.Properties(ctx, vmRef.Reference(), nil, &props); err != nil {
-		return nil, fmt.Errorf("error getting VM properties: %w", err)
+		return nil, fmt.Errorf("failed to get VM properties: %w", err)
 	}
 	datastorePathObj := new(object.DatastorePath)
 	isSuccess := datastorePathObj.FromString(props.Summary.Config.VmPathName)
 	if !isSuccess {
-		return nil, fmt.Errorf("Failed to parse volPath: %s", props.Summary.Config.VmPathName)
+		return nil, fmt.Errorf("failed to parse volPath: %s", props.Summary.Config.VmPathName)
 	}
 	return session.Finder.Datastore(ctx, datastorePathObj.Datastore)
 }
 
-func resolveResourcePoolRef(ctx context.Context, config *Config, session *Session, vm *object.VirtualMachine) (*types.ManagedObjectReference, error) {
+func resolveResourcePoolRef(ctx context.Context, config *Config, session *Session) (*types.ManagedObjectReference, error) {
 	if config.ResourcePool != "" {
 		targetResourcePool, err := session.Finder.ResourcePool(ctx, config.ResourcePool)
 		if err != nil {
@@ -456,14 +453,14 @@ func resolveResourcePoolRef(ctx context.Context, config *Config, session *Sessio
 	return nil, nil
 }
 
-func attachTags(ctx context.Context, config *Config, vm *object.VirtualMachine) error {
+func attachTags(ctx context.Context, log *zap.SugaredLogger, config *Config, vm *object.VirtualMachine) error {
 	restAPISession, err := NewRESTSession(ctx, config)
 	if err != nil {
 		return fmt.Errorf("failed to create REST API session: %w", err)
 	}
 	defer restAPISession.Logout(ctx)
 	tagManager := tags.NewManager(restAPISession.Client)
-	klog.V(3).Info("Attaching tags")
+	log.Debug("Attaching tags")
 	for _, tag := range config.Tags {
 		tagID, err := determineTagID(ctx, tagManager, tag)
 		if err != nil {
@@ -471,14 +468,14 @@ func attachTags(ctx context.Context, config *Config, vm *object.VirtualMachine) 
 		}
 
 		if err := tagManager.AttachTag(ctx, tagID, vm.Reference()); err != nil {
-			klog.V(3).Infof("Failed to attach tag %v. The tag was successfully deleted", tag)
+			log.Debugw("Failed to attach tag; it was successfully deleted", "tag", tag)
 			return fmt.Errorf("failed to attach tag to VM: %v %w", tag.Name, err)
 		}
 	}
 	return nil
 }
 
-func detachTags(ctx context.Context, config *Config, vm *object.VirtualMachine) error {
+func detachTags(ctx context.Context, log *zap.SugaredLogger, config *Config, vm *object.VirtualMachine) error {
 	restAPISession, err := NewRESTSession(ctx, config)
 	if err != nil {
 		return fmt.Errorf("failed to create REST API session: %w", err)
@@ -490,7 +487,7 @@ func detachTags(ctx context.Context, config *Config, vm *object.VirtualMachine) 
 	if err != nil {
 		return fmt.Errorf("failed to get attached tags for the VM: %s, %w", vm.Name(), err)
 	}
-	klog.V(3).Info("Deleting tags")
+	log.Debug("Deleting tags")
 	for _, tag := range attachedTags {
 		tagID, err := determineTagID(ctx, tagManager, tag)
 		if err != nil {

@@ -56,9 +56,8 @@ spec:
             ipv6: false
             tags:
               - "machine-controller"
-          # Can be 'ubuntu' or 'centos'
           operatingSystem: "ubuntu"
           operatingSystemSpec:
             disableAutoUpdate: true
       versions:
-        kubelet: 1.24.9
+        kubelet: 1.33.4

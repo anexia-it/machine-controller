@@ -17,6 +17,7 @@ limitations under the License.
 package provisioning
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -26,21 +27,20 @@ import (
 
 	"github.com/Masterminds/semver/v3"
 
-	providerconfigtypes "github.com/kubermatic/machine-controller/pkg/providerconfig/types"
+	providerconfigtypes "k8c.io/machine-controller/sdk/providerconfig"
 )
 
 var (
 	scenarios = buildScenarios()
 
 	versions = []*semver.Version{
-		semver.MustParse("v1.24.10"),
-		semver.MustParse("v1.25.6"),
-		semver.MustParse("v1.26.1"),
+		semver.MustParse("v1.32.9"),
+		semver.MustParse("v1.33.5"),
+		semver.MustParse("v1.34.1"),
 	}
 
 	operatingSystems = []providerconfigtypes.OperatingSystem{
 		providerconfigtypes.OperatingSystemUbuntu,
-		providerconfigtypes.OperatingSystemCentOS,
 		providerconfigtypes.OperatingSystemAmazonLinux2,
 		providerconfigtypes.OperatingSystemRHEL,
 		providerconfigtypes.OperatingSystemFlatcar,
@@ -49,22 +49,24 @@ var (
 
 	openStackImages = map[string]string{
 		string(providerconfigtypes.OperatingSystemUbuntu):     "kubermatic-ubuntu",
-		string(providerconfigtypes.OperatingSystemCentOS):     "machine-controller-e2e-centos",
-		string(providerconfigtypes.OperatingSystemRHEL):       "machine-controller-e2e-rhel-8-5",
-		string(providerconfigtypes.OperatingSystemFlatcar):    "machine-controller-e2e-flatcar-stable-2983",
+		string(providerconfigtypes.OperatingSystemRHEL):       "machine-controller-e2e-rhel-9-6",
+		string(providerconfigtypes.OperatingSystemFlatcar):    "kubermatic-e2e-flatcar",
+		string(providerconfigtypes.OperatingSystemRockyLinux): "machine-controller-e2e-rockylinux-9-6",
+	}
+
+	openNebulaImages = map[string]string{
+		string(providerconfigtypes.OperatingSystemFlatcar):    "machine-controller-e2e-flatcar",
 		string(providerconfigtypes.OperatingSystemRockyLinux): "machine-controller-e2e-rockylinux",
 	}
 
 	vSphereOSImageTemplates = map[string]string{
-		string(providerconfigtypes.OperatingSystemCentOS):     "kkp-centos-7",
 		string(providerconfigtypes.OperatingSystemFlatcar):    "kkp-flatcar-3139.2.0",
-		string(providerconfigtypes.OperatingSystemRHEL):       "kkp-rhel-8.6",
-		string(providerconfigtypes.OperatingSystemRockyLinux): "kkp-rockylinux-8.5",
-		string(providerconfigtypes.OperatingSystemUbuntu):     "kkp-ubuntu-22.04",
+		string(providerconfigtypes.OperatingSystemRHEL):       "kkp-rhel-9.6",
+		string(providerconfigtypes.OperatingSystemRockyLinux): "kkp-rockylinux-9.6",
+		string(providerconfigtypes.OperatingSystemUbuntu):     "kkp-ubuntu-24.04",
 	}
 
 	kubevirtImages = map[string]string{
-		string(providerconfigtypes.OperatingSystemCentOS):     "centos",
 		string(providerconfigtypes.OperatingSystemFlatcar):    "flatcar",
 		string(providerconfigtypes.OperatingSystemRHEL):       "rhel",
 		string(providerconfigtypes.OperatingSystemRockyLinux): "rockylinux",
@@ -156,30 +158,51 @@ func (n *name) Match(tc scenario) bool {
 	return tc.name == n.name
 }
 
-func runScenarios(st *testing.T, selector Selector, testParams []string, manifestPath string, cloudProvider string) {
+// VersionSelector is used to match against the kubernetes version used for a test case.
+func VersionSelector(v ...string) Selector {
+	return &version{v}
+}
+
+type version struct {
+	versions []string
+}
+
+var _ Selector = &version{}
+
+func (v *version) Match(testCase scenario) bool {
+	for _, version := range v.versions {
+		if testCase.kubernetesVersion == version {
+			return true
+		}
+	}
+	return false
+}
+
+func runScenarios(ctx context.Context, st *testing.T, selector Selector, testParams []string, manifestPath string, cloudProvider string) {
 	for _, testCase := range scenarios {
 		if selector != nil && !selector.Match(testCase) {
+			fmt.Printf("Skipping test %s\n", testCase.name)
 			continue
 		}
 
 		st.Run(testCase.name, func(it *testing.T) {
-			testScenario(it, testCase, cloudProvider, testParams, manifestPath, true)
+			testScenario(ctx, it, testCase, cloudProvider, testParams, manifestPath, true)
 		})
 	}
 }
 
 // scenarioExecutor represents an executor for a given scenario
 // args: kubeConfig, maifestPath, scenarioParams, timeout
-type scenarioExecutor func(string, string, []string, time.Duration) error
+type scenarioExecutor func(context.Context, string, string, []string, time.Duration) error
 
-func testScenario(t *testing.T, testCase scenario, cloudProvider string, testParams []string, manifestPath string, parallelize bool) {
+func testScenario(ctx context.Context, t *testing.T, testCase scenario, cloudProvider string, testParams []string, manifestPath string, parallelize bool) {
 	if parallelize {
 		t.Parallel()
 	}
 
 	kubernetesCompliantName := fmt.Sprintf("%s-%s", testCase.name, cloudProvider)
-	kubernetesCompliantName = strings.Replace(kubernetesCompliantName, " ", "-", -1)
-	kubernetesCompliantName = strings.Replace(kubernetesCompliantName, ".", "-", -1)
+	kubernetesCompliantName = strings.ReplaceAll(kubernetesCompliantName, " ", "-")
+	kubernetesCompliantName = strings.ReplaceAll(kubernetesCompliantName, ".", "-")
 	kubernetesCompliantName = strings.ToLower(kubernetesCompliantName)
 
 	scenarioParams := append([]string(nil), testParams...)
@@ -195,7 +218,7 @@ func testScenario(t *testing.T, testCase scenario, cloudProvider string, testPar
 		rhsmOfflineToken := os.Getenv("REDHAT_SUBSCRIPTIONS_OFFLINE_TOKEN")
 
 		if rhelSubscriptionManagerUser == "" || rhelSubscriptionManagerPassword == "" || rhsmOfflineToken == "" {
-			t.Fatalf("Unable to run e2e tests, RHEL_SUBSCRIPTION_MANAGER_USER, RHEL_SUBSCRIPTION_MANAGER_PASSWORD, and " +
+			t.Fatal("Unable to run e2e tests, RHEL_SUBSCRIPTION_MANAGER_USER, RHEL_SUBSCRIPTION_MANAGER_PASSWORD, and " +
 				"REDHAT_SUBSCRIPTIONS_OFFLINE_TOKEN must be set when rhel is used as an os")
 		}
 
@@ -206,22 +229,17 @@ func testScenario(t *testing.T, testCase scenario, cloudProvider string, testPar
 		scenarioParams = append(scenarioParams, fmt.Sprintf("<< OS_DISK_SIZE >>=%v", 0))
 		scenarioParams = append(scenarioParams, fmt.Sprintf("<< DATA_DISK_SIZE >>=%v", 0))
 		scenarioParams = append(scenarioParams, fmt.Sprintf("<< CUSTOM-IMAGE >>=%v", "rhel-8-1-custom"))
-		scenarioParams = append(scenarioParams, fmt.Sprintf("<< AMI >>=%s", "ami-08c04369895785ac4"))
 		scenarioParams = append(scenarioParams, fmt.Sprintf("<< MAX_PRICE >>=%s", "0.08"))
 	} else {
 		scenarioParams = append(scenarioParams, fmt.Sprintf("<< OS_DISK_SIZE >>=%v", 30))
 		scenarioParams = append(scenarioParams, fmt.Sprintf("<< DATA_DISK_SIZE >>=%v", 30))
-		scenarioParams = append(scenarioParams, fmt.Sprintf("<< AMI >>=%s", ""))
 		scenarioParams = append(scenarioParams, fmt.Sprintf("<< DISK_SIZE >>=%v", 25))
 		scenarioParams = append(scenarioParams, fmt.Sprintf("<< CUSTOM-IMAGE >>=%v", ""))
-		scenarioParams = append(scenarioParams, fmt.Sprintf("<< MAX_PRICE >>=%s", "0.03"))
+		scenarioParams = append(scenarioParams, fmt.Sprintf("<< MAX_PRICE >>=%s", "0.023"))
 	}
 
 	if strings.Contains(cloudProvider, string(providerconfigtypes.CloudProviderEquinixMetal)) {
 		switch testCase.osName {
-		case string(providerconfigtypes.OperatingSystemCentOS):
-			scenarioParams = append(scenarioParams, fmt.Sprintf("<< INSTANCE_TYPE >>=%s", "m3.small.x86"))
-			scenarioParams = append(scenarioParams, fmt.Sprintf("<< METRO_CODE >>=%s", "AM"))
 		case string(providerconfigtypes.OperatingSystemFlatcar):
 			scenarioParams = append(scenarioParams, fmt.Sprintf("<< INSTANCE_TYPE >>=%s", "c3.small.x86"))
 			scenarioParams = append(scenarioParams, fmt.Sprintf("<< METRO_CODE >>=%s", "NY"))
@@ -241,6 +259,9 @@ func testScenario(t *testing.T, testCase scenario, cloudProvider string, testPar
 	// only used by OpenStack scenarios
 	scenarioParams = append(scenarioParams, fmt.Sprintf("<< OS_IMAGE >>=%s", openStackImages[testCase.osName]))
 
+	// only used by OpenNebula scenarios
+	scenarioParams = append(scenarioParams, fmt.Sprintf("<< ONE_IMAGE >>=%s", openNebulaImages[testCase.osName]))
+
 	// only use by vSphere scenarios
 	scenarioParams = append(scenarioParams, fmt.Sprintf("<< OS_Image_Template >>=%s", vSphereOSImageTemplates[testCase.osName]))
 
@@ -251,14 +272,14 @@ func testScenario(t *testing.T, testCase scenario, cloudProvider string, testPar
 	gopath := os.Getenv("GOPATH")
 	projectDir := filepath.Join(gopath, "src/github.com/kubermatic/machine-controller")
 	kubeConfig := filepath.Join(projectDir, ".kubeconfig")
-
-	if _, err := os.Stat(kubeConfig); err == nil {
-		// it exists at hardcoded path
-	} else if os.IsNotExist(err) {
-		// it doesn't exist, fall back to $KUBECONFIG
-		kubeConfig = os.Getenv("KUBECONFIG")
-	} else {
-		t.Fatal(err)
+	_, err := os.Stat(kubeConfig)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// it doesn't exist, fall back to $KUBECONFIG
+			kubeConfig = os.Getenv("KUBECONFIG")
+		} else {
+			t.Fatal(err)
+		}
 	}
 
 	// the golang test runtime waits for individual subtests to complete before reporting the status.
@@ -267,7 +288,7 @@ func testScenario(t *testing.T, testCase scenario, cloudProvider string, testPar
 	// we decided to keep this time lower that the global timeout to prevent the following:
 	// the global timeout is set to 20 minutes and the verify tool waits up to 60 hours for a machine to show up.
 	// thus one faulty scenario prevents from showing the results for the whole group, which is confusing because it looks like all tests are broken.
-	if err := testCase.executor(kubeConfig, manifestPath, scenarioParams, 35*time.Minute); err != nil {
+	if err := testCase.executor(ctx, kubeConfig, manifestPath, scenarioParams, 35*time.Minute); err != nil {
 		t.Errorf("verify failed due to error=%v", err)
 	}
 }

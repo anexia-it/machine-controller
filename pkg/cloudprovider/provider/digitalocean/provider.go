@@ -25,32 +25,31 @@ import (
 	"time"
 
 	"github.com/digitalocean/godo"
+	"go.uber.org/zap"
 	"golang.org/x/oauth2"
 
-	"github.com/kubermatic/machine-controller/pkg/apis/cluster/common"
-	clusterv1alpha1 "github.com/kubermatic/machine-controller/pkg/apis/cluster/v1alpha1"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/common/ssh"
-	cloudprovidererrors "github.com/kubermatic/machine-controller/pkg/cloudprovider/errors"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/instance"
-	digitaloceantypes "github.com/kubermatic/machine-controller/pkg/cloudprovider/provider/digitalocean/types"
-	cloudprovidertypes "github.com/kubermatic/machine-controller/pkg/cloudprovider/types"
-	"github.com/kubermatic/machine-controller/pkg/cloudprovider/util"
-	"github.com/kubermatic/machine-controller/pkg/providerconfig"
-	providerconfigtypes "github.com/kubermatic/machine-controller/pkg/providerconfig/types"
+	"k8c.io/machine-controller/pkg/cloudprovider/common/ssh"
+	cloudprovidererrors "k8c.io/machine-controller/pkg/cloudprovider/errors"
+	"k8c.io/machine-controller/pkg/cloudprovider/instance"
+	cloudprovidertypes "k8c.io/machine-controller/pkg/cloudprovider/types"
+	"k8c.io/machine-controller/sdk/apis/cluster/common"
+	clusterv1alpha1 "k8c.io/machine-controller/sdk/apis/cluster/v1alpha1"
+	digitaloceantypes "k8c.io/machine-controller/sdk/cloudprovider/digitalocean"
+	"k8c.io/machine-controller/sdk/net"
+	"k8c.io/machine-controller/sdk/providerconfig"
 
-	v1 "k8s.io/api/core/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/klog"
 )
 
 type provider struct {
-	configVarResolver *providerconfig.ConfigVarResolver
+	configVarResolver providerconfig.ConfigVarResolver
 }
 
 // New returns a digitalocean provider.
-func New(configVarResolver *providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
+func New(configVarResolver providerconfig.ConfigVarResolver) cloudprovidertypes.Provider {
 	return &provider{configVarResolver: configVarResolver}
 }
 
@@ -82,16 +81,14 @@ func (t *TokenSource) Token() (*oauth2.Token, error) {
 	return token, nil
 }
 
-func getSlugForOS(os providerconfigtypes.OperatingSystem) (string, error) {
+func getSlugForOS(os providerconfig.OperatingSystem) (string, error) {
 	switch os {
-	case providerconfigtypes.OperatingSystemUbuntu:
-		return "ubuntu-22-04-x64", nil
-	case providerconfigtypes.OperatingSystemCentOS:
-		return "centos-7-x64", nil
-	case providerconfigtypes.OperatingSystemRockyLinux:
-		return "rockylinux-8-x64", nil
+	case providerconfig.OperatingSystemUbuntu:
+		return "ubuntu-24-04-x64", nil
+	case providerconfig.OperatingSystemRockyLinux:
+		return "rockylinux-9-x64", nil
 	}
-	return "", providerconfigtypes.ErrOSNotSupported
+	return "", providerconfig.ErrOSNotSupported
 }
 
 func getClient(ctx context.Context, token string) *godo.Client {
@@ -103,12 +100,8 @@ func getClient(ctx context.Context, token string) *godo.Client {
 	return godo.NewClient(oauthClient)
 }
 
-func (p *provider) getConfig(provSpec clusterv1alpha1.ProviderSpec) (*Config, *providerconfigtypes.Config, error) {
-	if provSpec.Value == nil {
-		return nil, nil, fmt.Errorf("machine.spec.providerconfig.value is nil")
-	}
-
-	pconfig, err := providerconfigtypes.GetConfig(provSpec)
+func (p *provider) getConfig(provSpec clusterv1alpha1.ProviderSpec) (*Config, *providerconfig.Config, error) {
+	pconfig, err := providerconfig.GetConfig(provSpec)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -123,36 +116,36 @@ func (p *provider) getConfig(provSpec clusterv1alpha1.ProviderSpec) (*Config, *p
 	}
 
 	c := Config{}
-	c.Token, err = p.configVarResolver.GetConfigVarStringValueOrEnv(rawConfig.Token, "DO_TOKEN")
+	c.Token, err = p.configVarResolver.GetStringValueOrEnv(rawConfig.Token, "DO_TOKEN")
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get the value of \"token\" field, error = %w", err)
 	}
-	c.Region, err = p.configVarResolver.GetConfigVarStringValue(rawConfig.Region)
+	c.Region, err = p.configVarResolver.GetStringValue(rawConfig.Region)
 	if err != nil {
 		return nil, nil, err
 	}
-	c.Size, err = p.configVarResolver.GetConfigVarStringValue(rawConfig.Size)
+	c.Size, err = p.configVarResolver.GetStringValue(rawConfig.Size)
 	if err != nil {
 		return nil, nil, err
 	}
-	c.Backups, _, err = p.configVarResolver.GetConfigVarBoolValue(rawConfig.Backups)
+	c.Backups, _, err = p.configVarResolver.GetBoolValue(rawConfig.Backups)
 	if err != nil {
 		return nil, nil, err
 	}
-	c.IPv6, _, err = p.configVarResolver.GetConfigVarBoolValue(rawConfig.IPv6)
+	c.IPv6, _, err = p.configVarResolver.GetBoolValue(rawConfig.IPv6)
 	if err != nil {
 		return nil, nil, err
 	}
-	c.PrivateNetworking, _, err = p.configVarResolver.GetConfigVarBoolValue(rawConfig.PrivateNetworking)
+	c.PrivateNetworking, _, err = p.configVarResolver.GetBoolValue(rawConfig.PrivateNetworking)
 	if err != nil {
 		return nil, nil, err
 	}
-	c.Monitoring, _, err = p.configVarResolver.GetConfigVarBoolValue(rawConfig.Monitoring)
+	c.Monitoring, _, err = p.configVarResolver.GetBoolValue(rawConfig.Monitoring)
 	if err != nil {
 		return nil, nil, err
 	}
 	for _, tag := range rawConfig.Tags {
-		tagVal, err := p.configVarResolver.GetConfigVarStringValue(tag)
+		tagVal, err := p.configVarResolver.GetStringValue(tag)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -162,11 +155,11 @@ func (p *provider) getConfig(provSpec clusterv1alpha1.ProviderSpec) (*Config, *p
 	return &c, pconfig, err
 }
 
-func (p *provider) AddDefaults(spec clusterv1alpha1.MachineSpec) (clusterv1alpha1.MachineSpec, error) {
+func (p *provider) AddDefaults(_ *zap.SugaredLogger, spec clusterv1alpha1.MachineSpec) (clusterv1alpha1.MachineSpec, error) {
 	return spec, nil
 }
 
-func (p *provider) Validate(ctx context.Context, spec clusterv1alpha1.MachineSpec) error {
+func (p *provider) Validate(ctx context.Context, _ *zap.SugaredLogger, spec clusterv1alpha1.MachineSpec) error {
 	c, pc, err := p.getConfig(spec.ProviderSpec)
 	if err != nil {
 		return fmt.Errorf("failed to parse config: %w", err)
@@ -190,14 +183,14 @@ func (p *provider) Validate(ctx context.Context, spec clusterv1alpha1.MachineSpe
 	}
 
 	switch f := pc.Network.GetIPFamily(); f {
-	case util.IPFamilyUnspecified, util.IPFamilyIPv4:
+	case net.IPFamilyUnspecified, net.IPFamilyIPv4:
 	// noop
-	case util.IPFamilyIPv6:
-		return fmt.Errorf(util.ErrIPv6OnlyUnsupported)
-	case util.IPFamilyIPv4IPv6, util.IPFamilyIPv6IPv4:
+	case net.IPFamilyIPv6:
+		return fmt.Errorf(net.ErrIPv6OnlyUnsupported)
+	case net.IPFamilyIPv4IPv6, net.IPFamilyIPv6IPv4:
 		// noop
 	default:
-		return fmt.Errorf(util.ErrUnknownNetworkFamily, f)
+		return fmt.Errorf(net.ErrUnknownNetworkFamily, f)
 	}
 
 	client := getClient(ctx, c.Token)
@@ -276,7 +269,7 @@ func uploadRandomSSHPublicKey(ctx context.Context, service godo.KeysService) (st
 	return newDoKey.Fingerprint, nil
 }
 
-func (p *provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData, userdata string) (instance.Instance, error) {
+func (p *provider) Create(ctx context.Context, log *zap.SugaredLogger, machine *clusterv1alpha1.Machine, _ *cloudprovidertypes.ProviderData, userdata string) (instance.Instance, error) {
 	c, pc, err := p.getConfig(machine.Spec.ProviderSpec)
 	if err != nil {
 		return nil, cloudprovidererrors.TerminalError{
@@ -294,7 +287,7 @@ func (p *provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine,
 	defer func() {
 		_, err := client.Keys.DeleteByFingerprint(ctx, fingerprint)
 		if err != nil {
-			klog.Errorf("failed to remove a temporary ssh key with fingerprint = %v, due to = %v", fingerprint, err)
+			log.Errorw("Failed to remove a temporary ssh key", "fingerprint", fingerprint, zap.Error(err))
 		}
 	}()
 
@@ -324,8 +317,10 @@ func (p *provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine,
 		return nil, doStatusAndErrToTerminalError(rsp.StatusCode, err)
 	}
 
+	dropletLog := log.With("droplet", droplet.ID)
+
 	//We need to wait until the droplet really got created as tags will be only applied when the droplet is running
-	err = wait.Poll(createCheckPeriod, createCheckTimeout, func() (done bool, err error) {
+	err = wait.PollUntilContextTimeout(ctx, createCheckPeriod, createCheckTimeout, false, func(ctx context.Context) (bool, error) {
 		newDroplet, rsp, err := client.Droplets.Get(ctx, droplet.ID)
 		if err != nil {
 			tErr := doStatusAndErrToTerminalError(rsp.StatusCode, err)
@@ -334,20 +329,20 @@ func (p *provider) Create(ctx context.Context, machine *clusterv1alpha1.Machine,
 			}
 			//Well just wait 10 sec and hope the droplet got started by then...
 			time.Sleep(createCheckFailedWaitPeriod)
-			return false, fmt.Errorf("droplet (id='%d') got created but we failed to fetch its status", droplet.ID)
+			return false, fmt.Errorf("droplet %q got created but we failed to fetch its status", droplet.ID)
 		}
 		if sets.NewString(newDroplet.Tags...).Has(string(machine.UID)) {
-			klog.V(6).Infof("droplet (id='%d') got fully created", droplet.ID)
+			dropletLog.Debug("Droplet got fully created")
 			return true, nil
 		}
-		klog.V(6).Infof("waiting until droplet (id='%d') got fully created...", droplet.ID)
+		dropletLog.Debug("Waiting until droplet got fully created...")
 		return false, nil
 	})
 
 	return &doInstance{droplet: droplet}, err
 }
 
-func (p *provider) Cleanup(ctx context.Context, machine *clusterv1alpha1.Machine, _ *cloudprovidertypes.ProviderData) (bool, error) {
+func (p *provider) Cleanup(ctx context.Context, _ *zap.SugaredLogger, machine *clusterv1alpha1.Machine, _ *cloudprovidertypes.ProviderData) (bool, error) {
 	instance, err := p.get(ctx, machine)
 	if err != nil {
 		if errors.Is(err, cloudprovidererrors.ErrInstanceNotFound) {
@@ -378,7 +373,7 @@ func (p *provider) Cleanup(ctx context.Context, machine *clusterv1alpha1.Machine
 	return false, nil
 }
 
-func (p *provider) Get(ctx context.Context, machine *clusterv1alpha1.Machine, _ *cloudprovidertypes.ProviderData) (instance.Instance, error) {
+func (p *provider) Get(ctx context.Context, _ *zap.SugaredLogger, machine *clusterv1alpha1.Machine, _ *cloudprovidertypes.ProviderData) (instance.Instance, error) {
 	return p.get(ctx, machine)
 }
 
@@ -436,7 +431,7 @@ func (p *provider) listDroplets(ctx context.Context, token string) ([]godo.Dropl
 	return result, nil
 }
 
-func (p *provider) MigrateUID(ctx context.Context, machine *clusterv1alpha1.Machine, newUID types.UID) error {
+func (p *provider) MigrateUID(ctx context.Context, _ *zap.SugaredLogger, machine *clusterv1alpha1.Machine, newUID types.UID) error {
 	c, _, err := p.getConfig(machine.Spec.ProviderSpec)
 	if err != nil {
 		return fmt.Errorf("failed to decode providerconfig: %w", err)
@@ -475,10 +470,6 @@ func (p *provider) MigrateUID(ctx context.Context, machine *clusterv1alpha1.Mach
 	return nil
 }
 
-func (p *provider) GetCloudConfig(spec clusterv1alpha1.MachineSpec) (config string, name string, err error) {
-	return "", "", nil
-}
-
 func (p *provider) MachineMetricsLabels(machine *clusterv1alpha1.Machine) (map[string]string, error) {
 	labels := make(map[string]string)
 
@@ -504,23 +495,26 @@ func (d *doInstance) ID() string {
 }
 
 func (d *doInstance) ProviderID() string {
+	if d.droplet == nil || d.droplet.Name == "" {
+		return ""
+	}
 	return fmt.Sprintf("digitalocean://%d", d.droplet.ID)
 }
 
-func (d *doInstance) Addresses() map[string]v1.NodeAddressType {
-	addresses := map[string]v1.NodeAddressType{}
+func (d *doInstance) Addresses() map[string]corev1.NodeAddressType {
+	addresses := map[string]corev1.NodeAddressType{}
 	for _, n := range d.droplet.Networks.V4 {
 		if n.Type == "public" {
-			addresses[n.IPAddress] = v1.NodeExternalIP
+			addresses[n.IPAddress] = corev1.NodeExternalIP
 		} else {
-			addresses[n.IPAddress] = v1.NodeInternalIP
+			addresses[n.IPAddress] = corev1.NodeInternalIP
 		}
 	}
 	for _, n := range d.droplet.Networks.V6 {
 		if n.Type == "public" {
-			addresses[n.IPAddress] = v1.NodeExternalIP
+			addresses[n.IPAddress] = corev1.NodeExternalIP
 		} else {
-			addresses[n.IPAddress] = v1.NodeInternalIP
+			addresses[n.IPAddress] = corev1.NodeInternalIP
 		}
 	}
 	return addresses
@@ -556,6 +550,6 @@ func doStatusAndErrToTerminalError(status int, err error) error {
 	}
 }
 
-func (p *provider) SetMetricsForMachines(machines clusterv1alpha1.MachineList) error {
+func (p *provider) SetMetricsForMachines(_ clusterv1alpha1.MachineList) error {
 	return nil
 }
