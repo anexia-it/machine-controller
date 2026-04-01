@@ -52,6 +52,8 @@ type RawDisk struct {
 	Size int `json:"size"`
 	// PerformanceType specifies the performance of the disk.
 	PerformanceType providerconfig.ConfigVarString `json:"performanceType"`
+	// Name as human readable identifier for the disk
+	Name string `json:"name"`
 }
 
 // RawNetwork specifies a single network interface.
