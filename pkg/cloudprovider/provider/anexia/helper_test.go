@@ -123,13 +123,7 @@ func hookableReconcileContext(locationID string, templateID string, hook func(*r
 		Config: resolvedConfig{
 			LocationID: locationID,
 			TemplateID: templateID,
-			Disks: []resolvedDisk{
-				{
-					RawDisk: anxtypes.RawDisk{
-						Size: 5,
-					},
-				},
-			},
+			DiskSize:   5,
 			Networks: []resolvedNetwork{
 				{
 					VlanID: "VLAN-ID",

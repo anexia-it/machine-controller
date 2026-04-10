@@ -93,7 +93,7 @@ func (p *provider) Create(ctx context.Context, log *zap.SugaredLogger, machine *
 	// provision machine
 	err = provisionVM(ctx, reconcileCtx, log, client)
 	if err != nil {
-		return nil, anexiaErrorToTerminalError(err, "failed waiting for vm provisioning")
+		return nil, wrapAnexiaError(err, "failed waiting for vm provisioning")
 	}
 	return p.Get(ctx, log, machine, data)
 }
@@ -378,7 +378,7 @@ func (p *provider) Get(ctx context.Context, log *zap.SugaredLogger, machine *clu
 	if status.InstanceID == "" {
 		p, err := vsphereAPI.Provisioning().Progress().Get(ctx, status.ProvisioningID)
 		if err != nil {
-			return nil, anexiaErrorToTerminalError(err, "failed to get provisioning progress")
+			return nil, wrapAnexiaError(err, "failed to get provisioning progress")
 		}
 
 		switch p.Status {
@@ -407,7 +407,7 @@ func (p *provider) Get(ctx context.Context, log *zap.SugaredLogger, machine *clu
 
 	info, err := vsphereAPI.Info().Get(timeoutCtx, status.InstanceID)
 	if err != nil {
-		return nil, anexiaErrorToTerminalError(err, "failed getting machine info")
+		return nil, wrapAnexiaError(err, "failed getting machine info")
 	}
 	instance.info = &info
 
@@ -458,15 +458,6 @@ func (p *provider) Cleanup(ctx context.Context, log *zap.SugaredLogger, machine 
 			// Only error if the error was not "not found"
 			if !errors.As(err, &respErr) || respErr.ErrorData.Code != http.StatusNotFound {
 				return false, newError(common.DeleteMachineError, "failed to delete machine: %v", err)
-			}
-
-			// good thinking checking for a "not found" error, but go-anxcloud does only
-			// return >= 500 && < 600 errors (:
-			// since that's the legacy client in go-anxcloud and the new one is not yet available,
-			// this will not be fixed there but we have a nice workaround here:
-
-			if response.Identifier == "" {
-				return true, nil
 			}
 		}
 		status.DeprovisioningID = response.Identifier
@@ -577,7 +568,7 @@ func updateMachineStatus(machine *clusterv1alpha1.Machine, status anxtypes.Provi
 	return nil
 }
 
-func anexiaErrorToTerminalError(err error, msg string) error {
+func wrapAnexiaError(err error, msg string) error {
 	var httpError api.HTTPError
 	if errors.As(err, &httpError) && (httpError.StatusCode() == http.StatusForbidden || httpError.StatusCode() == http.StatusUnauthorized) {
 		return cloudprovidererrors.TerminalError{
@@ -587,10 +578,16 @@ func anexiaErrorToTerminalError(err error, msg string) error {
 	}
 
 	var responseError *anxclient.ResponseError
-	if errors.As(err, &responseError) && (responseError.ErrorData.Code == http.StatusForbidden || responseError.ErrorData.Code == http.StatusUnauthorized) {
-		return cloudprovidererrors.TerminalError{
-			Reason:  common.InvalidConfigurationMachineError,
-			Message: "Request was rejected due to invalid credentials",
+	if errors.As(err, &responseError) {
+		if responseError.ErrorData.Code == http.StatusForbidden || responseError.ErrorData.Code == http.StatusUnauthorized {
+			return cloudprovidererrors.TerminalError{
+				Reason:  common.InvalidConfigurationMachineError,
+				Message: "Request was rejected due to invalid credentials",
+			}
+		}
+
+		if responseError.ErrorData.Code == http.StatusNotFound {
+			return cloudprovidererrors.ErrInstanceNotFound
 		}
 	}
 

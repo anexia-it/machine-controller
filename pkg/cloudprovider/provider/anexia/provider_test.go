@@ -485,7 +485,7 @@ func TestValidate(t *testing.T) {
 		},
 		{
 			Name:   "vlan deprecated",
-			Config: hookableConfig(func(c *anxtypes.RawConfig) { c.VlanID.Value = "legacy VLAN-ID" }),
+			Config: hookableConfig(func(c *anxtypes.RawConfig) { c.VlanID = &providerconfigtypes.ConfigVarString{Value: "legacy VLAN-ID"} }),
 			Error:  anxtypes.ErrConfigVlanIDAndNetworks,
 		},
 		{
@@ -572,7 +572,7 @@ func TestUpdateStatus(t *testing.T) {
 	testhelper.AssertNoErr(t, err)
 }
 
-func Test_anexiaErrorToTerminalError(t *testing.T) {
+func Test_wrapAnexiaError(t *testing.T) {
 	forbiddenMockHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
 		_, err := w.Write([]byte(`{"error": {"code": 403}}`))
@@ -633,7 +633,7 @@ func Test_anexiaErrorToTerminalError(t *testing.T) {
 			srv := httptest.NewServer(testCase.mockHandler)
 			defer srv.Close()
 
-			err := anexiaErrorToTerminalError(testCase.run(srv.URL), "foo")
+			err := wrapAnexiaError(testCase.run(srv.URL), "foo")
 			if ok, _, _ := cloudprovidererrors.IsTerminalError(err); !ok {
 				t.Errorf("unexpected error %#v, expected TerminalError", err)
 			}
@@ -642,7 +642,7 @@ func Test_anexiaErrorToTerminalError(t *testing.T) {
 
 	t.Run("api client 404 HTTPError shouldn't convert to TerminalError", func(t *testing.T) {
 		err := api.NewHTTPError(http.StatusNotFound, "GET", &url.URL{}, errors.New("foo"))
-		err = anexiaErrorToTerminalError(err, "foo")
+		err = wrapAnexiaError(err, "foo")
 		if ok, _, _ := cloudprovidererrors.IsTerminalError(err); ok {
 			t.Errorf("unexpected error %#v, expected no TerminalError", err)
 		}
@@ -650,9 +650,23 @@ func Test_anexiaErrorToTerminalError(t *testing.T) {
 
 	t.Run("legacy api client unspecific ResponseError shouldn't convert to TerminalError", func(t *testing.T) {
 		var err error = &anxclient.ResponseError{}
-		err = anexiaErrorToTerminalError(err, "foo")
+		err = wrapAnexiaError(err, "foo")
 		if ok, _, _ := cloudprovidererrors.IsTerminalError(err); ok {
 			t.Errorf("unexpected error %#v, expected no TerminalError", err)
+		}
+	})
+
+	t.Run("legacy api client 404 ResponseError should convert to NotFoundError", func(t *testing.T) {
+		var err error = &anxclient.ResponseError{
+			ErrorData: struct {
+				Code       int               `json:"code"`
+				Message    string            `json:"message"`
+				Validation map[string]string `json:"validation"`
+			}{Code: http.StatusNotFound, Message: "test msg", Validation: nil},
+		}
+		err = wrapAnexiaError(err, "foo")
+		if ok := cloudprovidererrors.IsNotFound(err); !ok {
+			t.Errorf("unexpected error %#v, expected ErrInstanceNotFound", err)
 		}
 	})
 }

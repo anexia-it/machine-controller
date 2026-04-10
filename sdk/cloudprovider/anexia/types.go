@@ -54,6 +54,8 @@ type RawDisk struct {
 	PerformanceType providerconfig.ConfigVarString `json:"performanceType"`
 	// Name as human readable identifier for the disk
 	Name string `json:"name"`
+	// Identifier of the disk to maintain engine sync
+	Identifier string `json:"identifier,omitempty"`
 }
 
 // RawNetwork specifies a single network interface.
@@ -70,6 +72,9 @@ type RawNetwork struct {
 	//
 	// If unset, the default value from the Anexia Engine is used, which is usually 1000.
 	BandwidthLimit int `json:"bandwidthLimit,omitempty"`
+
+	// Identifier of the Network to maintain engine sync
+	Identifier string `json:"identifier,omitempty"`
 }
 
 // RawConfig contains all the configuration values for VMs to create, with some values maybe being fetched from secrets.
@@ -102,7 +107,7 @@ type RawConfig struct {
 	Disks []RawDisk `json:"disks"`
 
 	// Deprecated, use Networks instead.
-	VlanID providerconfig.ConfigVarString `json:"vlanID,omitempty"`
+	VlanID *providerconfig.ConfigVarString `json:"vlanID,omitempty"`
 
 	// Configuration of the network interfaces. At least one entry with at
 	// least one Prefix is required.
