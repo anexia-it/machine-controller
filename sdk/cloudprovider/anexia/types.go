@@ -102,7 +102,7 @@ type RawConfig struct {
 	Disks []RawDisk `json:"disks"`
 
 	// Deprecated, use Networks instead.
-	VlanID providerconfig.ConfigVarString `json:"vlanID"`
+	VlanID providerconfig.ConfigVarString `json:"vlanID,omitempty"`
 
 	// Configuration of the network interfaces. At least one entry with at
 	// least one Prefix is required.
