@@ -126,6 +126,7 @@ func provisionVM(ctx context.Context, log *zap.SugaredLogger, client anxclient.C
 			networkInterfaces,
 		)
 
+		vm.AvailabilityZone = config.AvailabilityZone
 		vm.DiskType = config.Disks[0].PerformanceType
 
 		if config.CPUPerformanceType != "" {

@@ -95,6 +95,8 @@ type RawConfig struct {
 	// Configuration of the network interfaces. At least one entry with at
 	// least one Prefix is required.
 	Networks []RawNetwork `json:"networks"`
+
+	AvailabilityZone string `json:"availability_zone,omitempty"`
 }
 
 type NetworkAddressStatus struct {
