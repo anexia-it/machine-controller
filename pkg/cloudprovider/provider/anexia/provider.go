@@ -32,6 +32,7 @@ import (
 	"go.anx.io/go-anxcloud/pkg/vsphere/provisioning/progress"
 	anxvm "go.anx.io/go-anxcloud/pkg/vsphere/provisioning/vm"
 	"go.uber.org/zap"
+	ctrlruntimeclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	"k8c.io/machine-controller/pkg/cloudprovider/common/ssh"
 	cloudprovidererrors "k8c.io/machine-controller/pkg/cloudprovider/errors"
@@ -58,9 +59,54 @@ type provider struct {
 	configVarResolver providerconfig.ConfigVarResolver
 }
 
+func GetAKENodepoolIDForMachine(ctx context.Context, machine *clusterv1alpha1.Machine, c ctrlruntimeclient.Client) (string, error) {
+	var (
+		machineSetName        string
+		machineDeploymentName string
+	)
+	for _, ownerRef := range machine.OwnerReferences {
+		if ownerRef.Kind == "MachineSet" {
+			machineSetName = ownerRef.Name
+		}
+	}
+
+	if machineSetName != "" {
+		machineSet := &clusterv1alpha1.MachineSet{}
+		if err := c.Get(ctx, k8stypes.NamespacedName{Name: machineSetName, Namespace: machine.Namespace}, machineSet); err != nil {
+			return "", err
+		}
+
+		for _, ownerRef := range machineSet.OwnerReferences {
+			if ownerRef.Kind == "MachineDeployment" {
+				machineDeploymentName = ownerRef.Name
+			}
+		}
+
+		machineDeployment := &clusterv1alpha1.MachineDeployment{}
+		if err := c.Get(ctx, k8stypes.NamespacedName{Name: machineDeploymentName, Namespace: machine.Namespace}, machineDeployment); err != nil {
+			return "", err
+		}
+
+		id, ok := machineDeployment.Spec.Selector.MatchLabels["ake-nodepool"]
+		if ok {
+			return id, nil
+		}
+	}
+
+	return "", fmt.Errorf("failed to find machine deployment reference for the machine %s", machine.Name)
+}
+
 func (p *provider) Create(ctx context.Context, log *zap.SugaredLogger, machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData, userdata string) (instance instance.Instance, retErr error) {
 	status := getProviderStatus(log, machine)
 	log.Debugw("Machine status", "status", status)
+
+	akeNodepoolID, err := GetAKENodepoolIDForMachine(ctx, machine, data.Client)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get nodepool ID for machine %s: %w", machine.Name, err)
+	}
+
+	_ = akeNodepoolID
+	// todo query engine to check if nodepool exists
 
 	// ensure conditions are present on machine
 	ensureConditions(&status)
