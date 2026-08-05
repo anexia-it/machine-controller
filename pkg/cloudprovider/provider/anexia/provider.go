@@ -127,6 +127,7 @@ func provisionVM(ctx context.Context, reconcileContext reconcileContext, log *za
 
 		vm.DiskType = config.DiskPerformanceType
 
+		vm.AvailabilityZone = config.AvailabilityZone
 		if config.CPUPerformanceType != "" {
 			vm.CPUPerformanceType = config.CPUPerformanceType
 		}
