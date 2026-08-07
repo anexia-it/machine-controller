@@ -61,6 +61,8 @@ type resolvedConfig struct {
 	DiskSize            int
 	DiskPerformanceType string
 	Memory              int
+
+	AvailabilityZone string
 }
 
 func (p *provider) resolveTemplateID(ctx context.Context, a api.API, config anxtypes.RawConfig, locationID string) (string, error) {

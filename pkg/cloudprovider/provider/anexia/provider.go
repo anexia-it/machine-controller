@@ -123,6 +123,7 @@ func provisionVM(ctx context.Context, reconcileContext reconcileContext, log *za
 			config.Memory,
 			config.DiskSize,
 			networkInterfaces,
+
 		)
 
 		vm.DiskType = config.DiskPerformanceType
