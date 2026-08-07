@@ -175,6 +175,7 @@ func (p *provider) resolveConfig(ctx context.Context, log *zap.SugaredLogger, co
 		DiskSize:            config.DiskSize,
 		DiskPerformanceType: config.DiskPerformanceType,
 		Memory:              config.Memory,
+		AvailabilityZone:    config.AvailabilityZone,
 	}
 
 	ret.Token, err = p.configVarResolver.GetStringValueOrEnv(config.Token, anxtypes.AnxTokenEnv)

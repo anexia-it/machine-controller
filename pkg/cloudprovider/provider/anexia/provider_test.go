@@ -156,6 +156,17 @@ func TestAnexiaProvider(t *testing.T) {
 					testhelper.AssertEquals(t, json.Number("10000"), networkObject["bandwidth_limit"])
 				},
 			},
+			{
+				// Provision a generic VM with an availability zone
+				ReconcileContext: hookableReconcileContext("LOCATION-ID", "SET-AVAILABILITY-ZONE", func(rc *reconcileContext) {
+					rc.Config.AvailabilityZone = "zone"
+				}),
+				AssertJSONBody: func(jsonBody jsonObject) {
+					zone := jsonBody["availability_zone"].(string)
+					//networkObject := networkArray[0].(jsonObject)
+					testhelper.AssertEquals(t, "zone", zone)
+				},
+			},
 		}
 
 		testhelper.Mux.HandleFunc("/api/ipam/v1/address/reserve/ip/count.json", func(writer http.ResponseWriter, _ *http.Request) {
