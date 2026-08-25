@@ -49,14 +49,19 @@ type resolvedNetwork struct {
 
 // resolvedConfig contains the resolved values from types.RawConfig.
 type resolvedConfig struct {
-	anxtypes.RawConfig
-
-	Token      string
 	LocationID string
 	TemplateID string
 
-	Disks    []resolvedDisk
-	Networks []resolvedNetwork
+	Disks               []resolvedDisk
+	Networks            []resolvedNetwork
+	SSHPublicKeys       []string
+	CPUs                int
+	CPUPerformanceType  string
+	DiskSize            int
+	DiskPerformanceType string
+	Memory              int
+
+	AvailabilityZone string
 }
 
 func (p *provider) resolveTemplateID(ctx context.Context, a api.API, config anxtypes.RawConfig, locationID string) (string, error) {
@@ -79,25 +84,27 @@ func (p *provider) resolveTemplateID(ctx context.Context, a api.API, config anxt
 }
 
 func (p *provider) resolveNetworkConfig(log *zap.SugaredLogger, config anxtypes.RawConfig) (*[]resolvedNetwork, error) {
-	legacyVlanIDConfig, _ := config.VlanID.MarshalJSON()
-	if string(legacyVlanIDConfig) != `""` {
-		if len(config.Networks) != 0 {
-			return nil, anxtypes.ErrConfigVlanIDAndNetworks
+	if config.VlanID != nil {
+		legacyVlanIDConfig, _ := config.VlanID.MarshalJSON()
+		if string(legacyVlanIDConfig) != `""` {
+			if len(config.Networks) != 0 {
+				return nil, anxtypes.ErrConfigVlanIDAndNetworks
+			}
+
+			log.Info("Configuration uses the deprecated VlanID attribute, please migrate to the Networks array instead.")
+
+			vlanID, err := p.configVarResolver.GetStringValue(*config.VlanID)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get 'vlanID': %w", err)
+			}
+
+			return &[]resolvedNetwork{
+				{
+					VlanID:   vlanID,
+					Prefixes: []string{""},
+				},
+			}, nil
 		}
-
-		log.Info("Configuration uses the deprecated VlanID attribute, please migrate to the Networks array instead.")
-
-		vlanID, err := p.configVarResolver.GetStringValue(config.VlanID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get 'vlanID': %w", err)
-		}
-
-		return &[]resolvedNetwork{
-			{
-				VlanID:   vlanID,
-				Prefixes: []string{""},
-			},
-		}, nil
 	}
 
 	ret := make([]resolvedNetwork, len(config.Networks))
@@ -141,22 +148,7 @@ func (p *provider) resolveBandwidthLimitConfig(config anxtypes.RawNetwork) (int,
 	}
 }
 
-func (p *provider) resolveDiskConfig(log *zap.SugaredLogger, config anxtypes.RawConfig) (*[]resolvedDisk, error) {
-	if config.DiskSize != 0 {
-		if len(config.Disks) != 0 {
-			return nil, anxtypes.ErrConfigDiskSizeAndDisks
-		}
-
-		log.Info("Configuration uses the deprecated DiskSize attribute, please migrate to the Disks array instead.")
-
-		config.Disks = []anxtypes.RawDisk{
-			{
-				Size: config.DiskSize,
-			},
-		}
-		config.DiskSize = 0
-	}
-
+func (p *provider) resolveDiskConfig(_ *zap.SugaredLogger, config anxtypes.RawConfig) (*[]resolvedDisk, error) {
 	ret := make([]resolvedDisk, len(config.Disks))
 
 	for idx, disk := range config.Disks {
@@ -177,12 +169,12 @@ func (p *provider) resolveDiskConfig(log *zap.SugaredLogger, config anxtypes.Raw
 func (p *provider) resolveConfig(ctx context.Context, log *zap.SugaredLogger, config anxtypes.RawConfig) (*resolvedConfig, error) {
 	var err error
 	ret := resolvedConfig{
-		RawConfig: config,
-	}
-
-	ret.Token, err = p.configVarResolver.GetStringValueOrEnv(config.Token, anxtypes.AnxTokenEnv)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get 'token': %w", err)
+		CPUs:                config.CPUs,
+		CPUPerformanceType:  config.CPUPerformanceType,
+		DiskSize:            config.DiskSize,
+		DiskPerformanceType: config.DiskPerformanceType,
+		Memory:              config.Memory,
+		AvailabilityZone:    config.AvailabilityZone,
 	}
 
 	ret.LocationID, err = p.configVarResolver.GetStringValue(config.LocationID)
@@ -209,7 +201,7 @@ func (p *provider) resolveConfig(ctx context.Context, log *zap.SugaredLogger, co
 
 	// when "templateID" is not set, we expect "template" to be
 	if ret.TemplateID == "" {
-		a, _, err := getClient(ret.Token, nil)
+		a, _, err := getClient(nil)
 		if err != nil {
 			return nil, fmt.Errorf("failed initializing API clients: %w", err)
 		}

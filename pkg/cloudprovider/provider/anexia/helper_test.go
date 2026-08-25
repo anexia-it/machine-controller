@@ -39,11 +39,13 @@ type ProvisionVMTestCase struct {
 }
 
 type ConfigTestCase struct {
+	Name   string
 	Config anxtypes.RawConfig
 	Error  error
 }
 
 type ValidateCallTestCase struct {
+	Name          string
 	Spec          clusterv1alpha1.MachineSpec
 	ExpectedError error
 }
@@ -66,6 +68,7 @@ func getSpecsForValidationTest(t *testing.T, configCases []ConfigTestCase) []Val
 				},
 			},
 			ExpectedError: configCase.Error,
+			Name:          configCase.Name,
 		})
 	}
 	return testCases
@@ -82,7 +85,12 @@ func hookableConfig(hook func(*anxtypes.RawConfig)) anxtypes.RawConfig {
 	config := anxtypes.RawConfig{
 		CPUs: 1,
 
+		CPUPerformanceType: "performance",
+
 		Memory: 2,
+
+		DiskSize:            5,
+		DiskPerformanceType: "performance",
 
 		Disks: []anxtypes.RawDisk{
 			{Size: 5, PerformanceType: newConfigVarString("ENT6")},
@@ -92,7 +100,6 @@ func hookableConfig(hook func(*anxtypes.RawConfig)) anxtypes.RawConfig {
 			{VlanID: newConfigVarString("test-vlan"), PrefixIDs: []providerconfigtypes.ConfigVarString{newConfigVarString("test-prefix")}},
 		},
 
-		Token:      newConfigVarString("test-token"),
 		LocationID: newConfigVarString("test-location"),
 		TemplateID: newConfigVarString("test-template-id"),
 	}
@@ -115,13 +122,7 @@ func hookableReconcileContext(locationID string, templateID string, hook func(*r
 		Config: resolvedConfig{
 			LocationID: locationID,
 			TemplateID: templateID,
-			Disks: []resolvedDisk{
-				{
-					RawDisk: anxtypes.RawDisk{
-						Size: 5,
-					},
-				},
-			},
+			DiskSize:   5,
 			Networks: []resolvedNetwork{
 				{
 					VlanID: "VLAN-ID",
@@ -130,10 +131,8 @@ func hookableReconcileContext(locationID string, templateID string, hook func(*r
 					},
 				},
 			},
-			RawConfig: anxtypes.RawConfig{
-				CPUs:   5,
-				Memory: 5,
-			},
+			CPUs:   5,
+			Memory: 5,
 		},
 		ProviderData: &cloudprovidertypes.ProviderData{
 			Update: func(*clusterv1alpha1.Machine, ...cloudprovidertypes.MachineModifier) error {

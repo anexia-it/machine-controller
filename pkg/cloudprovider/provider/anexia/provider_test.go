@@ -156,6 +156,17 @@ func TestAnexiaProvider(t *testing.T) {
 					testhelper.AssertEquals(t, json.Number("10000"), networkObject["bandwidth_limit"])
 				},
 			},
+			{
+				// Provision a generic VM with an availability zone
+				ReconcileContext: hookableReconcileContext("LOCATION-ID", "SET-AVAILABILITY-ZONE", func(rc *reconcileContext) {
+					rc.Config.AvailabilityZone = "zone"
+				}),
+				AssertJSONBody: func(jsonBody jsonObject) {
+					zone := jsonBody["availability_zone"].(string)
+					//networkObject := networkArray[0].(jsonObject)
+					testhelper.AssertEquals(t, "zone", zone)
+				},
+			},
 		}
 
 		testhelper.Mux.HandleFunc("/api/ipam/v1/address/reserve/ip/count.json", func(writer http.ResponseWriter, _ *http.Request) {
@@ -205,10 +216,93 @@ func TestAnexiaProvider(t *testing.T) {
 				testhelper.AssertNoErr(t, err)
 			})
 
-			ctx := createReconcileContext(context.Background(), testCase.ReconcileContext)
-
-			err := provisionVM(ctx, log, client)
+			err := provisionVM(context.Background(), testCase.ReconcileContext, log, client)
 			testhelper.AssertNoErr(t, err)
+		}
+	})
+
+	t.Run("Test resolve network", func(t *testing.T) {
+		t.Parallel()
+
+		type testCase struct {
+			config          anxtypes.RawConfig
+			expectedError   string
+			expectedNetwork []resolvedNetwork
+		}
+
+		testCases := []testCase{
+			{
+				// Failing to parse should mention the reason
+				config: hookableConfig(func(c *anxtypes.RawConfig) {
+					c.Networks = []anxtypes.RawNetwork{
+						{
+							VlanID:         providerconfigtypes.ConfigVarString{Value: "17825213"},
+							PrefixIDs:      []providerconfigtypes.ConfigVarString{{Value: "0987654"}},
+							BandwidthLimit: 19,
+						},
+					}
+				}),
+				expectedError:   "failed to parse bandwidth limit",
+				expectedNetwork: []resolvedNetwork{},
+			},
+			{
+				// Without Bandwidth specified
+				config: hookableConfig(func(c *anxtypes.RawConfig) {
+					c.Networks = []anxtypes.RawNetwork{
+						{
+							VlanID:    providerconfigtypes.ConfigVarString{Value: "17825213"},
+							PrefixIDs: []providerconfigtypes.ConfigVarString{{Value: "0987654"}},
+						},
+					}
+				}),
+				expectedError: "",
+				expectedNetwork: []resolvedNetwork{
+					{
+						VlanID:         "17825213",
+						Prefixes:       []string{"0987654"},
+						BandwidthLimit: 0,
+					},
+				},
+			},
+			{
+				// With one valid network
+				config: hookableConfig(func(c *anxtypes.RawConfig) {
+					c.Networks = []anxtypes.RawNetwork{
+						{
+							VlanID:         providerconfigtypes.ConfigVarString{Value: "17825213"},
+							PrefixIDs:      []providerconfigtypes.ConfigVarString{{Value: "0987654"}},
+							BandwidthLimit: 10000,
+						},
+					}
+				}),
+				expectedError: "",
+				expectedNetwork: []resolvedNetwork{
+					{
+						VlanID:         "17825213",
+						Prefixes:       []string{"0987654"},
+						BandwidthLimit: 10000,
+					},
+				},
+			},
+		}
+
+		provider := New(configvar.NewResolver(context.Background(), fake.NewClientBuilder().Build())).(*provider)
+		for _, testCase := range testCases {
+			resolvedNetworks, err := provider.resolveNetworkConfig(log, testCase.config)
+			if testCase.expectedError != "" {
+				testhelper.AssertErr(t, err)
+				testhelper.AssertEquals(t, true, strings.Contains(err.Error(), testCase.expectedError))
+				continue
+			} else {
+				testhelper.AssertNoErr(t, err)
+				for ni, network := range *resolvedNetworks {
+					testhelper.AssertEquals(t, testCase.expectedNetwork[ni].VlanID, network.VlanID)
+					for pi, prefix := range network.Prefixes {
+						testhelper.AssertEquals(t, testCase.expectedNetwork[ni].Prefixes[pi], prefix)
+					}
+					testhelper.AssertEquals(t, testCase.expectedNetwork[ni].BandwidthLimit, network.BandwidthLimit)
+				}
+			}
 		}
 	})
 
@@ -365,25 +459,25 @@ func TestAnexiaProvider(t *testing.T) {
 				},
 			},
 		}
-		ctx := createReconcileContext(context.Background(), reconcileContext{
+		reconcileCtx := reconcileContext{
 			Status:       &providerStatus,
 			UserData:     "",
 			Config:       resolvedConfig{},
 			ProviderData: nil,
-		})
+		}
 
 		condition := meta.FindStatusCondition(providerStatus.Conditions, ProvisionedType)
 		condition.LastTransitionTime = metav1.Time{Time: time.Now().Add(-1 * time.Minute)}
-		testhelper.AssertEquals(t, true, isAlreadyProvisioning(ctx))
+		testhelper.AssertEquals(t, true, isAlreadyProvisioning(reconcileCtx))
 
 		condition.Reason = "Provisioned"
 		condition.Status = metav1.ConditionTrue
-		testhelper.AssertEquals(t, false, isAlreadyProvisioning(ctx))
+		testhelper.AssertEquals(t, false, isAlreadyProvisioning(reconcileCtx))
 
 		condition.Reason = "InProvisioning"
 		condition.Status = metav1.ConditionFalse
 		condition.LastTransitionTime = metav1.Time{Time: time.Now().Add(-10 * time.Minute)}
-		testhelper.AssertEquals(t, false, isAlreadyProvisioning(ctx))
+		testhelper.AssertEquals(t, false, isAlreadyProvisioning(reconcileCtx))
 		testhelper.AssertEquals(t, condition.Reason, "ReInitialising")
 	})
 
@@ -401,83 +495,119 @@ func TestAnexiaProvider(t *testing.T) {
 				},
 			},
 		}
-		ctx := createReconcileContext(context.Background(), reconcileContext{Status: providerStatus})
+		reconcileCtx := reconcileContext{Status: providerStatus}
 
 		t.Run("with unbound reserved IP", func(t *testing.T) {
 			expectedIP := "8.8.8.8"
 			providerStatus.Networks[0].Addresses[0].ReservedIP = expectedIP
 			providerStatus.Networks[0].Addresses[0].IPState = anxtypes.IPStateUnbound
 			providerStatus.Networks[0].Addresses[0].IPProvisioningExpires = time.Now().Add(anxtypes.IPProvisioningExpires)
-			reservedIP, err := getIPAddress(ctx, log, &resolvedNetwork{}, "Prefix-ID", &providerStatus.Networks[0].Addresses[0], client)
+			reservedIP, err := getIPAddress(context.Background(), reconcileCtx, log, &resolvedNetwork{}, "Prefix-ID", &providerStatus.Networks[0].Addresses[0], client)
 			testhelper.AssertNoErr(t, err)
 			testhelper.AssertEquals(t, expectedIP, reservedIP)
 		})
 	})
 }
 
+func isAlreadyProvisioning(reconcileContext reconcileContext) bool {
+	status := reconcileContext.Status
+	condition := meta.FindStatusCondition(status.Conditions, ProvisionedType)
+	lastChange := condition.LastTransitionTime.Time
+	const reasonInProvisioning = "InProvisioning"
+	if condition.Reason == reasonInProvisioning && time.Since(lastChange) > 5*time.Minute {
+		meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+			Type:    ProvisionedType,
+			Reason:  "ReInitialising",
+			Message: "Could not find ongoing VM provisioning",
+			Status:  metav1.ConditionFalse,
+		})
+	}
+
+	return condition.Status == metav1.ConditionFalse && condition.Reason == reasonInProvisioning
+}
+
 func TestValidate(t *testing.T) {
 	t.Parallel()
 
-	var configCases []ConfigTestCase
-	configCases = append(configCases,
-		ConfigTestCase{
-			Config: hookableConfig(func(c *anxtypes.RawConfig) { c.Token.Value = "" }),
-			Error:  errors.New("token not set"),
-		},
-		ConfigTestCase{
+	configCases := []ConfigTestCase{
+		{
+			Name:   "no cpu count",
 			Config: hookableConfig(func(c *anxtypes.RawConfig) { c.CPUs = 0 }),
 			Error:  errors.New("cpu count is missing"),
 		},
-		ConfigTestCase{
-			Config: hookableConfig(func(c *anxtypes.RawConfig) { c.Disks = []anxtypes.RawDisk{} }),
-			Error:  errors.New("no disks configured"),
-		},
-		ConfigTestCase{
-			Config: hookableConfig(func(c *anxtypes.RawConfig) { c.DiskSize = 10 }),
-			Error:  anxtypes.ErrConfigDiskSizeAndDisks,
-		},
-		ConfigTestCase{
-			Config: hookableConfig(func(c *anxtypes.RawConfig) { c.Disks[0].Size = 0 }),
+		{
+			Name:   "no disk size",
+			Config: hookableConfig(func(c *anxtypes.RawConfig) { c.DiskSize = 0 }),
 			Error:  errors.New("disk size is missing"),
 		},
-		ConfigTestCase{
+		{
+			Name:   "no disk performance type",
+			Config: hookableConfig(func(c *anxtypes.RawConfig) { c.DiskPerformanceType = "" }),
+			Error:  errors.New("disk performance type is missing"),
+		},
+		{
+			Name:   "no cpu performance type",
+			Config: hookableConfig(func(c *anxtypes.RawConfig) { c.CPUPerformanceType = "" }),
+			Error:  errors.New("cpu performance type is missing"),
+		},
+		{
+			Name:   "no disk size for additional disk disk",
+			Config: hookableConfig(func(c *anxtypes.RawConfig) { c.Disks[0].Size = 0 }),
+			Error:  errors.New("disk size for disk 0 is missing"),
+		},
+		{
+			Name:   "no disk performance type for additional disk disk",
+			Config: hookableConfig(func(c *anxtypes.RawConfig) { c.Disks[0].PerformanceType.Value = "" }),
+			Error:  errors.New("disk performance type for disk 0 is missing"),
+		},
+		{
+			Name:   "no memory",
 			Config: hookableConfig(func(c *anxtypes.RawConfig) { c.Memory = 0 }),
 			Error:  errors.New("memory size is missing"),
 		},
-		ConfigTestCase{
+		{
+			Name:   "no location id",
 			Config: hookableConfig(func(c *anxtypes.RawConfig) { c.LocationID.Value = "" }),
 			Error:  errors.New("location id is missing"),
 		},
-
-		ConfigTestCase{
+		{
+			Name:   "no networks",
 			Config: hookableConfig(func(c *anxtypes.RawConfig) { c.Networks = []anxtypes.RawNetwork{} }),
 			Error:  errors.New("no networks configured"),
 		},
-		ConfigTestCase{
-			Config: hookableConfig(func(c *anxtypes.RawConfig) { c.VlanID.Value = "legacy VLAN-ID" }),
+		{
+			Name:   "vlan deprecated",
+			Config: hookableConfig(func(c *anxtypes.RawConfig) { c.VlanID = &providerconfigtypes.ConfigVarString{Value: "legacy VLAN-ID"} }),
 			Error:  anxtypes.ErrConfigVlanIDAndNetworks,
 		},
-		ConfigTestCase{
-			Config: hookableConfig(func(c *anxtypes.RawConfig) { c.DiskSize = 10; c.Disks = []anxtypes.RawDisk{} }),
-			Error:  nil,
+		{
+			Name: "combined",
+			Config: hookableConfig(func(c *anxtypes.RawConfig) {
+				c.CPUs = 0
+				c.CPUPerformanceType = ""
+			}),
+			Error: errors.Join(errors.New("cpu count is missing"), errors.New("cpu performance type is missing")),
 		},
-		ConfigTestCase{
+		{
+			Name:   "default is valid",
 			Config: hookableConfig(nil),
 			Error:  nil,
 		},
-	)
+	}
 
 	provider := New(configvar.NewResolver(context.Background(), fake.NewClientBuilder().Build()))
 	for _, testCase := range getSpecsForValidationTest(t, configCases) {
-		err := provider.Validate(context.Background(), zap.NewNop().Sugar(), testCase.Spec)
-		t.Logf("testing config case with expected err: %s", testCase.ExpectedError.Error())
-		if testCase.ExpectedError != nil {
-			if !errors.Is(err, testCase.ExpectedError) {
-				testhelper.AssertEquals(t, testCase.ExpectedError.Error(), err.Error())
+		testCase := testCase
+		t.Run(testCase.Name, func(t *testing.T) {
+			err := provider.Validate(context.Background(), zap.NewNop().Sugar(), testCase.Spec)
+			if testCase.ExpectedError != nil {
+				if !errors.Is(err, testCase.ExpectedError) {
+					testhelper.AssertEquals(t, testCase.ExpectedError.Error(), err.Error())
+				}
+			} else {
+				testhelper.AssertEquals(t, testCase.ExpectedError, err)
 			}
-		} else {
-			testhelper.AssertEquals(t, testCase.ExpectedError, err)
-		}
+		})
 	}
 }
 
@@ -534,7 +664,7 @@ func TestUpdateStatus(t *testing.T) {
 	testhelper.AssertNoErr(t, err)
 }
 
-func Test_anexiaErrorToTerminalError(t *testing.T) {
+func Test_wrapAnexiaError(t *testing.T) {
 	forbiddenMockHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
 		_, err := w.Write([]byte(`{"error": {"code": 403}}`))
@@ -595,7 +725,7 @@ func Test_anexiaErrorToTerminalError(t *testing.T) {
 			srv := httptest.NewServer(testCase.mockHandler)
 			defer srv.Close()
 
-			err := anexiaErrorToTerminalError(testCase.run(srv.URL), "foo")
+			err := wrapAnexiaError(testCase.run(srv.URL), "foo")
 			if ok, _, _ := cloudprovidererrors.IsTerminalError(err); !ok {
 				t.Errorf("unexpected error %#v, expected TerminalError", err)
 			}
@@ -604,7 +734,7 @@ func Test_anexiaErrorToTerminalError(t *testing.T) {
 
 	t.Run("api client 404 HTTPError shouldn't convert to TerminalError", func(t *testing.T) {
 		err := api.NewHTTPError(http.StatusNotFound, "GET", &url.URL{}, errors.New("foo"))
-		err = anexiaErrorToTerminalError(err, "foo")
+		err = wrapAnexiaError(err, "foo")
 		if ok, _, _ := cloudprovidererrors.IsTerminalError(err); ok {
 			t.Errorf("unexpected error %#v, expected no TerminalError", err)
 		}
@@ -612,9 +742,23 @@ func Test_anexiaErrorToTerminalError(t *testing.T) {
 
 	t.Run("legacy api client unspecific ResponseError shouldn't convert to TerminalError", func(t *testing.T) {
 		var err error = &anxclient.ResponseError{}
-		err = anexiaErrorToTerminalError(err, "foo")
+		err = wrapAnexiaError(err, "foo")
 		if ok, _, _ := cloudprovidererrors.IsTerminalError(err); ok {
 			t.Errorf("unexpected error %#v, expected no TerminalError", err)
+		}
+	})
+
+	t.Run("legacy api client 404 ResponseError should convert to NotFoundError", func(t *testing.T) {
+		var err error = &anxclient.ResponseError{
+			ErrorData: struct {
+				Code       int               `json:"code"`
+				Message    string            `json:"message"`
+				Validation map[string]string `json:"validation"`
+			}{Code: http.StatusNotFound, Message: "test msg", Validation: nil},
+		}
+		err = wrapAnexiaError(err, "foo")
+		if ok := cloudprovidererrors.IsNotFound(err); !ok {
+			t.Errorf("unexpected error %#v, expected ErrInstanceNotFound", err)
 		}
 	})
 }
