@@ -100,7 +100,6 @@ func hookableConfig(hook func(*anxtypes.RawConfig)) anxtypes.RawConfig {
 			{VlanID: newConfigVarString("test-vlan"), PrefixIDs: []providerconfigtypes.ConfigVarString{newConfigVarString("test-prefix")}},
 		},
 
-		Token:      newConfigVarString("test-token"),
 		LocationID: newConfigVarString("test-location"),
 		TemplateID: newConfigVarString("test-template-id"),
 	}

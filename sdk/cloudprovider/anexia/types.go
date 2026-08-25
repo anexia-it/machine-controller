@@ -79,8 +79,6 @@ type RawNetwork struct {
 
 // RawConfig contains all the configuration values for VMs to create, with some values maybe being fetched from secrets.
 type RawConfig struct {
-	// Token specifies the Anexia Engine API token.
-	Token providerconfig.ConfigVarString `json:"token,omitempty"`
 	// LocationID specifies the datacenter location.
 	LocationID providerconfig.ConfigVarString `json:"locationID"`
 

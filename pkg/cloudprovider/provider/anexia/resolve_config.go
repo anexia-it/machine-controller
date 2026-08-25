@@ -49,7 +49,6 @@ type resolvedNetwork struct {
 
 // resolvedConfig contains the resolved values from types.RawConfig.
 type resolvedConfig struct {
-	Token      string
 	LocationID string
 	TemplateID string
 
@@ -178,11 +177,6 @@ func (p *provider) resolveConfig(ctx context.Context, log *zap.SugaredLogger, co
 		AvailabilityZone:    config.AvailabilityZone,
 	}
 
-	ret.Token, err = p.configVarResolver.GetStringValueOrEnv(config.Token, anxtypes.AnxTokenEnv)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get 'token': %w", err)
-	}
-
 	ret.LocationID, err = p.configVarResolver.GetStringValue(config.LocationID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get 'locationID': %w", err)
@@ -207,7 +201,7 @@ func (p *provider) resolveConfig(ctx context.Context, log *zap.SugaredLogger, co
 
 	// when "templateID" is not set, we expect "template" to be
 	if ret.TemplateID == "" {
-		a, _, err := getClient(ret.Token, nil)
+		a, _, err := getClient(nil)
 		if err != nil {
 			return nil, fmt.Errorf("failed initializing API clients: %w", err)
 		}
