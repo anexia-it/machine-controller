@@ -84,29 +84,6 @@ func (p *provider) resolveTemplateID(ctx context.Context, a api.API, config anxt
 }
 
 func (p *provider) resolveNetworkConfig(log *zap.SugaredLogger, config anxtypes.RawConfig) (*[]resolvedNetwork, error) {
-	if config.VlanID != nil {
-		legacyVlanIDConfig, _ := config.VlanID.MarshalJSON()
-		if string(legacyVlanIDConfig) != `""` {
-			if len(config.Networks) != 0 {
-				return nil, anxtypes.ErrConfigVlanIDAndNetworks
-			}
-
-			log.Info("Configuration uses the deprecated VlanID attribute, please migrate to the Networks array instead.")
-
-			vlanID, err := p.configVarResolver.GetStringValue(*config.VlanID)
-			if err != nil {
-				return nil, fmt.Errorf("failed to get 'vlanID': %w", err)
-			}
-
-			return &[]resolvedNetwork{
-				{
-					VlanID:   vlanID,
-					Prefixes: []string{""},
-				},
-			}, nil
-		}
-	}
-
 	ret := make([]resolvedNetwork, len(config.Networks))
 	for netIndex, net := range config.Networks {
 		vlanID, err := p.configVarResolver.GetStringValue(net.VlanID)
