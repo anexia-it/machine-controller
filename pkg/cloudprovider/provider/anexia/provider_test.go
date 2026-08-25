@@ -306,6 +306,92 @@ func TestAnexiaProvider(t *testing.T) {
 		}
 	})
 
+	t.Run("Test resolve network", func(t *testing.T) {
+		t.Parallel()
+
+		type testCase struct {
+			config                        anxtypes.RawConfig
+			expectedError                 string
+			expectedNetworkBandwidthLimit int
+			expectedNetwork               []resolvedNetwork
+		}
+
+		testCases := []testCase{
+			{
+				// Failing to parse should mention the reason
+				config: hookableConfig(func(c *anxtypes.RawConfig) {
+					c.Networks = []anxtypes.RawNetwork{
+						{
+							VlanID:         providerconfigtypes.ConfigVarString{Value: "17825213"},
+							PrefixIDs:      []providerconfigtypes.ConfigVarString{{Value: "0987654"}},
+							BandwidthLimit: 19,
+						},
+					}
+				}),
+				expectedError:   "failed to parse bandwidth limit",
+				expectedNetwork: []resolvedNetwork{},
+			},
+			{
+				// Without Bandwidth specified
+				config: hookableConfig(func(c *anxtypes.RawConfig) {
+					c.Networks = []anxtypes.RawNetwork{
+						{
+							VlanID:    providerconfigtypes.ConfigVarString{Value: "17825213"},
+							PrefixIDs: []providerconfigtypes.ConfigVarString{{Value: "0987654"}},
+						},
+					}
+				}),
+				expectedError: "",
+				expectedNetwork: []resolvedNetwork{
+					{
+						VlanID:         "17825213",
+						Prefixes:       []string{"0987654"},
+						BandwidthLimit: 0,
+					},
+				},
+			},
+			{
+				// With one valid network
+				config: hookableConfig(func(c *anxtypes.RawConfig) {
+					c.Networks = []anxtypes.RawNetwork{
+						{
+							VlanID:         providerconfigtypes.ConfigVarString{Value: "17825213"},
+							PrefixIDs:      []providerconfigtypes.ConfigVarString{{Value: "0987654"}},
+							BandwidthLimit: 10000,
+						},
+					}
+				}),
+				expectedError: "",
+				expectedNetwork: []resolvedNetwork{
+					{
+						VlanID:         "17825213",
+						Prefixes:       []string{"0987654"},
+						BandwidthLimit: 10000,
+					},
+				},
+			},
+		}
+
+		provider := New(configvar.NewResolver(context.Background(), fake.NewClientBuilder().Build())).(*provider)
+		for _, testCase := range testCases {
+			resolvedNetworks, err := provider.resolveNetworkConfig(log, testCase.config)
+			if testCase.expectedError != "" {
+				testhelper.AssertErr(t, err)
+				testhelper.AssertEquals(t, true, strings.Contains(err.Error(), testCase.expectedError))
+				continue
+			} else {
+				testhelper.AssertNoErr(t, err)
+				for ni, network := range *resolvedNetworks {
+					testhelper.AssertEquals(t, testCase.expectedNetwork[ni].VlanID, network.VlanID)
+					for pi, prefix := range network.Prefixes {
+						testhelper.AssertEquals(t, testCase.expectedNetwork[ni].Prefixes[pi], prefix)
+					}
+					testhelper.AssertEquals(t, testCase.expectedNetwork[ni].BandwidthLimit, network.BandwidthLimit)
+				}
+			}
+		}
+	})
+
 	t.Run("Test resolve template", func(t *testing.T) {
 		t.Parallel()
 
