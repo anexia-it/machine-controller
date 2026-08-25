@@ -96,7 +96,6 @@ func networkInterfacesForProvisioning(ctx context.Context, reconcileContext reco
 var _engsup3404mutex sync.Mutex
 
 func getIPAddress(ctx context.Context, reconcileContext reconcileContext, log *zap.SugaredLogger, network *resolvedNetwork, prefix string, status *anxtypes.NetworkAddressStatus, client anxclient.Client) (string, error) {
-
 	// only use IP if it is still unbound
 	if status.ReservedIP != "" && status.IPState == anxtypes.IPStateUnbound && (!status.IPProvisioningExpires.IsZero() && status.IPProvisioningExpires.After(time.Now())) {
 		log.Infow("Re-using already provisioned IP", "ip", status.ReservedIP)
