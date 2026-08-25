@@ -17,10 +17,10 @@ limitations under the License.
 package anexia
 
 import (
+	"encoding/json"
 	"errors"
 	"time"
 
-	"k8c.io/machine-controller/sdk/jsonutil"
 	"k8c.io/machine-controller/sdk/providerconfig"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -138,5 +138,5 @@ type ProviderStatus struct {
 func GetConfig(pconfig providerconfig.Config) (*RawConfig, error) {
 	rawConfig := &RawConfig{}
 
-	return rawConfig, jsonutil.StrictUnmarshal(pconfig.CloudProviderSpec.Raw, rawConfig)
+	return rawConfig, json.Unmarshal(pconfig.CloudProviderSpec.Raw, rawConfig)
 }
