@@ -18,7 +18,6 @@ package anexia
 
 import (
 	"encoding/json"
-	"errors"
 	"time"
 
 	"k8c.io/machine-controller/sdk/providerconfig"
@@ -39,11 +38,6 @@ const (
 
 	VirtioNIC        = "virtio"
 	MachinePoweredOn = "poweredOn"
-)
-
-var (
-	// ErrConfigVlanIDAndNetworks is returned when the config has both VlanID and Networks set, which is unsupported.
-	ErrConfigVlanIDAndNetworks = errors.New("both the deprecated VlanID and new Networks attribute are set")
 )
 
 // RawDisk specifies a single disk, with some values maybe being fetched from secrets.
@@ -103,9 +97,6 @@ type RawConfig struct {
 
 	// Disks specifies the additional disks.
 	Disks []RawDisk `json:"disks"`
-
-	// Deprecated, use Networks instead.
-	VlanID *providerconfig.ConfigVarString `json:"vlanID,omitempty"`
 
 	// Configuration of the network interfaces. At least one entry with at
 	// least one Prefix is required.
