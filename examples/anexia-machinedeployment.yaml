@@ -30,6 +30,13 @@ spec:
             # anything supported by the Anexia Engine
             cpuPerformanceType: performance
 
+            # Currently only the "Flatcar Linux Stable UEFI" template is supported.
+            # Use templateBuild to specify a build. If empty => latest
+            # Alternatively use templateID for a specific template.
+            template: "<< ANEXIA_TEMPLATE_NAME >>"
+            locationID: "<< ANEXIA_LOCATION_ID >>"
+            cpus: 2
+
             # from 1024 to 65536 MB
             memory: 4096
 
