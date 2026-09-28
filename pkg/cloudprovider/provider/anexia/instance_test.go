@@ -19,8 +19,8 @@ package anexia
 import (
 	"testing"
 
+	"github.com/anexia/go-anxsdk/v1/vsphere"
 	"github.com/gophercloud/gophercloud/testhelper"
-	"go.anx.io/go-anxcloud/pkg/vsphere/info"
 
 	corev1 "k8s.io/api/core/v1"
 )
@@ -54,15 +54,15 @@ func TestAnexiaInstance(t *testing.T) {
 
 	t.Run("instance with only info set", func(t *testing.T) {
 		instance := anexiaInstance{
-			info: &info.Info{
-				Network: []info.Network{
+			info: &vsphere.InfoGetResponse{
+				Network: []vsphere.InfoGetResponseNetwork{
 					{
-						IPv4: []string{"10.0.0.2"},
-						IPv6: []string{"fda0:23::2"},
+						IPsv4: []string{"10.0.0.2"},
+						IPsv6: []string{"fda0:23::2"},
 					},
 					{
-						IPv4: []string{"8.8.8.8"},
-						IPv6: []string{"2001:db8::2"},
+						IPsv4: []string{"8.8.8.8"},
+						IPsv6: []string{"2001:db8::2"},
 					},
 				},
 			},
@@ -79,15 +79,15 @@ func TestAnexiaInstance(t *testing.T) {
 	t.Run("instance with both reservedAddresses and info set, full overlapping set", func(t *testing.T) {
 		instance := anexiaInstance{
 			reservedAddresses: []string{"10.0.0.2", "fda0:23::2", "8.8.8.8", "2001:db8::2"},
-			info: &info.Info{
-				Network: []info.Network{
+			info: &vsphere.InfoGetResponse{
+				Network: []vsphere.InfoGetResponseNetwork{
 					{
-						IPv4: []string{"10.0.0.2"},
-						IPv6: []string{"fda0:23::2"},
+						IPsv4: []string{"10.0.0.2"},
+						IPsv6: []string{"fda0:23::2"},
 					},
 					{
-						IPv4: []string{"8.8.8.8"},
-						IPv6: []string{"2001:db8::2"},
+						IPsv4: []string{"8.8.8.8"},
+						IPsv6: []string{"2001:db8::2"},
 					},
 				},
 			},
@@ -104,14 +104,14 @@ func TestAnexiaInstance(t *testing.T) {
 	t.Run("instance with both reservedAddresses and info set, some overlap, each adding some", func(t *testing.T) {
 		instance := anexiaInstance{
 			reservedAddresses: []string{"10.0.0.2", "8.8.8.8", "2001:db8::2"},
-			info: &info.Info{
-				Network: []info.Network{
+			info: &vsphere.InfoGetResponse{
+				Network: []vsphere.InfoGetResponseNetwork{
 					{
-						IPv4: []string{"10.0.0.2"},
-						IPv6: []string{"fda0:23::2"},
+						IPsv4: []string{"10.0.0.2"},
+						IPsv6: []string{"fda0:23::2"},
 					},
 					{
-						IPv6: []string{"2001:db8::2"},
+						IPsv6: []string{"2001:db8::2"},
 					},
 				},
 			},
