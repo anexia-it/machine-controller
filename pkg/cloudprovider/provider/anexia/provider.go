@@ -43,11 +43,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8stypes "k8s.io/apimachinery/pkg/types"
+	kerrors "k8s.io/apimachinery/pkg/util/errors"
 )
 
 const (
-	ProvisioningType = "Provisioning"
-	ProvisionedType  = "Provisioned"
+	ProvisionedType = "Provisioned"
 
 	invalidCredentialsMessage = "Request was rejected due to invalid credentials"
 
@@ -61,10 +61,7 @@ type provider struct {
 }
 
 func (p *provider) Create(ctx context.Context, log *zap.SugaredLogger, machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData, userdata string) (instance instance.Instance, retErr error) {
-	status, err := getProviderStatus(log, machine)
-	if err != nil {
-		return nil, err
-	}
+	status := getProviderStatus(log, machine)
 	log.Debugw("Machine status", "status", status)
 
 	// ensure conditions are present on machine
@@ -89,7 +86,7 @@ func (p *provider) Create(ctx context.Context, log *zap.SugaredLogger, machine *
 	// make sure status is reflected in Machine Object
 	defer func() {
 		// if error occurs during updating the machine object don't override the original error
-		retErr = errors.Join(retErr, updateMachineStatus(machine, status, data.Update))
+		retErr = kerrors.NewAggregate([]error{retErr, updateMachineStatus(machine, status, data.Update)})
 	}()
 
 	// provision machine
@@ -106,7 +103,7 @@ func provisionVM(ctx context.Context, reconcileContext reconcileContext, log *za
 
 	status := reconcileContext.Status
 	if status.ProvisioningID == "" {
-		log.Info("Machine does not contain a provisioningID. Starting to provision")
+		log.Info("Machine does not contain a provisioningID yet. Starting to provision")
 
 		config := reconcileContext.Config
 		networkInterfaces, err := networkInterfacesForProvisioning(ctx, reconcileContext, log, addressClient)
@@ -144,6 +141,10 @@ func provisionVM(ctx context.Context, reconcileContext reconcileContext, log *za
 		providerCfg := reconcileContext.ProviderConfig
 		if providerCfg.Network != nil {
 			for index, dnsServer := range providerCfg.Network.DNS.Servers {
+				if dnsServer == "" {
+					continue
+				}
+
 				switch index {
 				case 0:
 					request.DNS1 = new(dnsServer)
@@ -169,27 +170,26 @@ func provisionVM(ctx context.Context, reconcileContext reconcileContext, log *za
 			request.SSH = new(sshKey.PublicKey)
 		}
 
-		provisionResponse, provisionErr := provisioningClient.ProvisionTemplate(ctx, config.LocationID, config.TemplateID, request)
-		if provisionErr != nil {
+		provisionResponse, err := provisioningClient.ProvisionTemplate(ctx, config.LocationID, config.TemplateID, request)
+		if err != nil {
 			meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 				Type:    ProvisionedType,
 				Status:  metav1.ConditionFalse,
 				Reason:  "ProvisioningError",
-				Message: fmt.Sprintf("instance provisioning failed: %v", provisionErr.Error()),
+				Message: fmt.Sprintf("instance provisioning failed: %v", err.Error()),
 			})
-			// errors.Join (not kerrors.NewAggregate) so that errors.As still
-			// finds the TerminalError - aggregate implements Is but not As.
-			return errors.Join(
-				newError(common.CreateMachineError, "instance provisioning failed: %v", provisionErr),
-				updateMachineStatus(reconcileContext.Machine, *status, reconcileContext.ProviderData.Update),
-			)
+			err = updateMachineStatus(reconcileContext.Machine, *status, reconcileContext.ProviderData.Update)
+			if err != nil {
+				return err
+			}
+			return newError(common.CreateMachineError, "instance provisioning failed: %v", err)
 		}
 
 		meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 			Type:    ProvisionedType,
 			Status:  metav1.ConditionFalse,
-			Reason:  ProvisioningType,
-			Message: "Provisioning request was sent",
+			Reason:  "Provisioning",
+			Message: "provisioning request was sent",
 		})
 
 		// we successfully sent a VM provisioning request to the API, we consider the IP as 'Bound' now
@@ -202,15 +202,13 @@ func provisionVM(ctx context.Context, reconcileContext reconcileContext, log *za
 		}
 	}
 
-	// We do not wait for the provisioning task to finish here - Get() polls the
-	// task and flips this condition to True once the API reports success.
-	log.Infow("Provisioning request accepted, waiting for completion", "provisioningID", status.ProvisioningID)
+	log.Info("Using provisionID from machine to await completion")
 
 	meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 		Type:    ProvisionedType,
-		Status:  metav1.ConditionFalse,
-		Reason:  ProvisioningType,
-		Message: "Provisioning request accepted, waiting for completion",
+		Status:  metav1.ConditionTrue,
+		Reason:  "Provisioned",
+		Message: "Machine has been successfully created",
 	})
 
 	return updateMachineStatus(reconcileContext.Machine, *status, reconcileContext.ProviderData.Update)
@@ -332,10 +330,7 @@ func (p *provider) Validate(ctx context.Context, log *zap.SugaredLogger, machine
 func (p *provider) Get(ctx context.Context, log *zap.SugaredLogger, machine *clusterv1alpha1.Machine, pd *cloudprovidertypes.ProviderData) (instance.Instance, error) {
 	sdkClient := getSDKClient(&machine.Name)
 
-	status, err := getProviderStatus(log, machine)
-	if err != nil {
-		return nil, err
-	}
+	status := getProviderStatus(log, machine)
 
 	if status.InstanceID == "" && status.ProvisioningID == "" {
 		return nil, cloudprovidererrors.ErrInstanceNotFound
@@ -346,9 +341,7 @@ func (p *provider) Get(ctx context.Context, log *zap.SugaredLogger, machine *clu
 		return &anexiaInstance{isDeleting: true}, nil
 	}
 
-	// possible out-of-band delete of the worker node in the anexia engine
-	// CCM deletes the node but here the InstanceID stays
-	if status.InstanceID == "" || status.ProvisioningID != "" {
+	if status.InstanceID == "" {
 		p, err := sdkClient.V1().VSphere().Provisioning().GetProvisioningProgress(ctx, status.ProvisioningID)
 		if err != nil {
 			return nil, wrapAnexiaError(err, "failed to get provisioning progress")
@@ -362,27 +355,13 @@ func (p *provider) Get(ctx context.Context, log *zap.SugaredLogger, machine *clu
 		// See also: VSD-1473
 		case vsphere.ProvisioningStatusSuccess:
 			status.InstanceID = p.VMIdentifier
-
-			// clear ProvisioningID after successfully provisioned
-			// if an out-of-band delete happens the ProvisioningID has to be empty in order to create a new machine inside Create() instead of waiting endlessly
-			status.ProvisioningID = ""
-			meta.SetStatusCondition(&status.Conditions, metav1.Condition{
-				Type:    ProvisionedType,
-				Status:  metav1.ConditionTrue,
-				Reason:  "Provisioned",
-				Message: "Machine has been successfully provisioned",
-			})
 			if err := updateMachineStatus(machine, status, pd.Update); err != nil {
 				return nil, fmt.Errorf("failed updating machine status: %w", err)
 			}
 		case vsphere.ProvisioningStatusFailed:
 			return nil, fmt.Errorf("vm provisioning had errors: %s", strings.Join(p.Errors, ","))
-		case vsphere.ProvisioningStatusCancelled:
-			return nil, fmt.Errorf("vm provisioning was cancelled: %s", strings.Join(p.Errors, ","))
 		case vsphere.ProvisioningStatusInProgress:
 			return &anexiaInstance{isCreating: true}, nil
-		default:
-			return nil, fmt.Errorf("unexpected provisioning status %q for task %q", p.Status, status.ProvisioningID)
 		}
 	}
 
@@ -413,15 +392,11 @@ func (p *provider) Cleanup(ctx context.Context, log *zap.SugaredLogger, machine 
 		return false, nil
 	}
 
-	status, err := getProviderStatus(log, machine)
-	if err != nil {
-		return false, err
-	}
-
+	status := getProviderStatus(log, machine)
 	// make sure status is reflected in Machine Object
 	defer func() {
 		// if error occurs during updating the machine object don't override the original error
-		retErr = errors.Join(retErr, updateMachineStatus(machine, status, data.Update))
+		retErr = kerrors.NewAggregate([]error{retErr, updateMachineStatus(machine, status, data.Update)})
 	}()
 
 	ensureConditions(&status)
@@ -433,17 +408,9 @@ func (p *provider) Cleanup(ctx context.Context, log *zap.SugaredLogger, machine 
 
 	// first check whether there is an provisioning ongoing
 	if status.DeprovisioningID == "" {
-		// Nothing was ever provisioned, so there is nothing to deprovision.
-		if status.InstanceID == "" {
-			return true, nil
-		}
-
 		response, err := provisioningClient.Deprovision(deleteCtx, status.InstanceID, false)
-		if err != nil {
-			// The VM is already gone, so we are done.
-			if anxsdkcommon.IsNotFoundError(err) {
-				return true, nil
-			}
+		// Only error if the error was not "not found"
+		if err != nil && !anxsdkcommon.IsNotFoundError(err) {
 			return false, newError(common.DeleteMachineError, "failed to delete machine: %v", err)
 		}
 		status.DeprovisioningID = response.Identifier
@@ -453,10 +420,6 @@ func (p *provider) Cleanup(ctx context.Context, log *zap.SugaredLogger, machine 
 }
 
 func isTaskDone(ctx context.Context, provisioningClient *vsphere.ProvisioningClient, progressIdentifier string) (bool, error) {
-	if progressIdentifier == "" {
-		return true, nil
-	}
-
 	response, err := provisioningClient.GetProvisioningProgress(ctx, progressIdentifier)
 	if err != nil {
 		return false, err
@@ -472,7 +435,7 @@ func isTaskDone(ctx context.Context, provisioningClient *vsphere.ProvisioningCli
 		taskErrors, _ := json.Marshal(response.Errors)
 		return true, fmt.Errorf("task failed with: %s", taskErrors)
 	default:
-		return false, fmt.Errorf("unexpected provisioning status %q for task %q", response.Status, progressIdentifier)
+		panic(fmt.Sprintf("unexpected progress.Status: %#v", response.Status))
 	}
 }
 
@@ -488,27 +451,20 @@ func (p *provider) SetMetricsForMachines(_ clusterv1alpha1.MachineList) error {
 	return nil
 }
 
-// getProviderStatus decodes the Anexia ProviderStatus from the Machine object.
-//
-// A decode failure must not be swallowed: this status is the only place where
-// the instance and reserved IPs of a Machine are recorded (nothing is tagged
-// with the Machine UID on the Anexia side and MigrateUID is a no-op), so
-// treating an unreadable status as "empty" would make the controller provision
-// a second VM and orphan the existing one together with its reserved IPs.
-func getProviderStatus(log *zap.SugaredLogger, machine *clusterv1alpha1.Machine) (anxtypes.ProviderStatus, error) {
+func getProviderStatus(log *zap.SugaredLogger, machine *clusterv1alpha1.Machine) anxtypes.ProviderStatus {
 	var providerStatus anxtypes.ProviderStatus
 	status := machine.Status.ProviderStatus
 	if status != nil && status.Raw != nil {
 		if err := json.Unmarshal(status.Raw, &providerStatus); err != nil {
-			log.Errorw("Failed to parse status from machine object", "error", err)
-			return anxtypes.ProviderStatus{}, fmt.Errorf("failed to parse provider status from machine object: %w", err)
+			log.Error("Failed to parse status from machine object; status was discarded for machine")
+			return anxtypes.ProviderStatus{}
 		}
 	}
-	return providerStatus, nil
+	return providerStatus
 }
 
 // newError creates a terminal error matching to the provider interface.
-func newError(reason common.MachineStatusError, msg string, args ...any) error {
+func newError(reason common.MachineStatusError, msg string, args ...interface{}) error {
 	return cloudprovidererrors.TerminalError{
 		Reason:  reason,
 		Message: fmt.Sprintf(msg, args...),

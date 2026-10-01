@@ -65,8 +65,6 @@ github.com/aliyun/alibaba-cloud-sdk-go v1.63.15 h1:r2uwBUQhLhcPzaWz9tRJqc8MjYwHb
 github.com/aliyun/alibaba-cloud-sdk-go v1.63.15/go.mod h1:SOSDHfe1kX91v3W5QiBsWSLqeLxImobbMX1mxrFHsVQ=
 github.com/anexia/go-anxsdk v0.0.0-20261005134346-e3b6ebc7de33 h1:EOi1dNQyEij3BvWsGhhGsLN3LfwXwQgj/TS23BqFvlg=
 github.com/anexia/go-anxsdk v0.0.0-20261005134346-e3b6ebc7de33/go.mod h1:AExqX9FmaBLWYWosZpSN8pvqPHZF/7MWn0egXPWhb4M=
-github.com/anexia/go-anxsdk v0.0.0-20261006055003-501ba630ab20 h1:OMTcaDD6hf8UFD78NI0FQ4ISImryoGUjh8LKrivvhJ0=
-github.com/anexia/go-anxsdk v0.0.0-20261006055003-501ba630ab20/go.mod h1:AExqX9FmaBLWYWosZpSN8pvqPHZF/7MWn0egXPWhb4M=
 github.com/araddon/dateparse v0.0.0-20210429162001-6b43995a97de h1:FxWPpzIjnTlhPwqqXc4/vE0f7GvRjuAsbW+HOIe8KnA=
 github.com/araddon/dateparse v0.0.0-20210429162001-6b43995a97de/go.mod h1:DCaWoUhZrYW9p1lxo/cm8EmUOOzAPSEZNGF2DK1dJgw=
 github.com/asaskevich/govalidator v0.0.0-20190424111038-f61b66f89f4a/go.mod h1:lB+ZfQJz7igIIfQNfa7Ml4HSf2uFQQRzpGGRXenZAgY=
