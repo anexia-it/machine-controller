@@ -21,16 +21,16 @@ import (
 	"sync"
 	"time"
 
+	"github.com/anexia/go-anxsdk/v1/vsphere"
 	anxclient "go.anx.io/go-anxcloud/pkg/client"
 	anxaddr "go.anx.io/go-anxcloud/pkg/ipam/address"
-	anxvm "go.anx.io/go-anxcloud/pkg/vsphere/provisioning/vm"
 	"go.uber.org/zap"
 
 	"k8c.io/machine-controller/sdk/apis/cluster/common"
 	anxtypes "k8c.io/machine-controller/sdk/cloudprovider/anexia"
 )
 
-func networkInterfacesForProvisioning(ctx context.Context, reconcileContext reconcileContext, log *zap.SugaredLogger, client anxclient.Client) ([]anxvm.Network, error) {
+func networkInterfacesForProvisioning(ctx context.Context, reconcileContext reconcileContext, log *zap.SugaredLogger, client anxclient.Client) ([]vsphere.ProvisioningRequestNetwork, error) {
 	config := reconcileContext.Config
 	status := reconcileContext.Status
 
@@ -45,7 +45,7 @@ func networkInterfacesForProvisioning(ctx context.Context, reconcileContext reco
 		status.Networks = make([]anxtypes.NetworkStatus, len(config.Networks))
 	}
 
-	ret := make([]anxvm.Network, len(config.Networks))
+	ret := make([]vsphere.ProvisioningRequestNetwork, len(config.Networks))
 	for netIndex, network := range config.Networks {
 		networkStatus := &status.Networks[netIndex]
 		addresses := make([]string, len(network.Prefixes))
@@ -70,10 +70,10 @@ func networkInterfacesForProvisioning(ctx context.Context, reconcileContext reco
 			addresses[prefixIndex] = reservedIP
 		}
 
-		ret[netIndex] = anxvm.Network{
-			VLAN:           network.VlanID,
+		ret[netIndex] = vsphere.ProvisioningRequestNetwork{
+			VLan:           network.VlanID,
 			IPs:            addresses,
-			NICType:        anxtypes.VirtioNIC,
+			NicType:        anxtypes.VirtioNIC,
 			BandwidthLimit: network.BandwidthLimit,
 		}
 	}
