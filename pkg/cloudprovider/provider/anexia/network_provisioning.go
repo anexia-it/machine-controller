@@ -30,9 +30,7 @@ import (
 	anxtypes "k8c.io/machine-controller/sdk/cloudprovider/anexia"
 )
 
-func networkInterfacesForProvisioning(ctx context.Context, log *zap.SugaredLogger, client anxclient.Client) ([]anxvm.Network, error) {
-	reconcileContext := getReconcileContext(ctx)
-
+func networkInterfacesForProvisioning(ctx context.Context, reconcileContext reconcileContext, log *zap.SugaredLogger, client anxclient.Client) ([]anxvm.Network, error) {
 	config := reconcileContext.Config
 	status := reconcileContext.Status
 
@@ -64,7 +62,7 @@ func networkInterfacesForProvisioning(ctx context.Context, log *zap.SugaredLogge
 				networkStatus.Addresses = make([]anxtypes.NetworkAddressStatus, len(network.Prefixes))
 			}
 
-			reservedIP, err := getIPAddress(ctx, log, &network, prefix, &networkStatus.Addresses[prefixIndex], client)
+			reservedIP, err := getIPAddress(ctx, reconcileContext, log, &network, prefix, &networkStatus.Addresses[prefixIndex], client)
 			if err != nil {
 				return nil, newError(common.CreateMachineError, "failed to reserve IP: %v", err)
 			}
@@ -97,8 +95,7 @@ func networkInterfacesForProvisioning(ctx context.Context, log *zap.SugaredLogge
 // again.. it's not too expensive of a Mutex.
 var _engsup3404mutex sync.Mutex
 
-func getIPAddress(ctx context.Context, log *zap.SugaredLogger, network *resolvedNetwork, prefix string, status *anxtypes.NetworkAddressStatus, client anxclient.Client) (string, error) {
-	reconcileContext := getReconcileContext(ctx)
+func getIPAddress(ctx context.Context, reconcileContext reconcileContext, log *zap.SugaredLogger, network *resolvedNetwork, prefix string, status *anxtypes.NetworkAddressStatus, client anxclient.Client) (string, error) {
 
 	// only use IP if it is still unbound
 	if status.ReservedIP != "" && status.IPState == anxtypes.IPStateUnbound && (!status.IPProvisioningExpires.IsZero() && status.IPProvisioningExpires.After(time.Now())) {

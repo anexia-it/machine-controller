@@ -70,14 +70,14 @@ func (p *provider) Create(ctx context.Context, log *zap.SugaredLogger, machine *
 		return nil, fmt.Errorf("failed to get provider config: %w", err)
 	}
 
-	ctx = createReconcileContext(ctx, reconcileContext{
+	reconcileCtx := reconcileContext{
 		Status:         &status,
 		UserData:       userdata,
 		Config:         *config,
 		ProviderData:   data,
 		ProviderConfig: providerCfg,
 		Machine:        machine,
-	})
+	}
 
 	_, client, err := getClient(config.Token, &machine.Name)
 	if err != nil {
@@ -91,15 +91,14 @@ func (p *provider) Create(ctx context.Context, log *zap.SugaredLogger, machine *
 	}()
 
 	// provision machine
-	err = provisionVM(ctx, log, client)
+	err = provisionVM(ctx, reconcileCtx, log, client)
 	if err != nil {
-		return nil, anexiaErrorToTerminalError(err, "failed waiting for vm provisioning")
+		return nil, wrapAnexiaError(err, "failed waiting for vm provisioning")
 	}
 	return p.Get(ctx, log, machine, data)
 }
 
-func provisionVM(ctx context.Context, log *zap.SugaredLogger, client anxclient.Client) error {
-	reconcileContext := getReconcileContext(ctx)
+func provisionVM(ctx context.Context, reconcileContext reconcileContext, log *zap.SugaredLogger, client anxclient.Client) error {
 	vmAPI := vsphere.NewAPI(client)
 
 	ctx, cancel := context.WithTimeout(ctx, anxtypes.CreateRequestTimeout)
@@ -110,7 +109,7 @@ func provisionVM(ctx context.Context, log *zap.SugaredLogger, client anxclient.C
 		log.Info("Machine does not contain a provisioningID yet. Starting to provision")
 
 		config := reconcileContext.Config
-		networkInterfaces, err := networkInterfacesForProvisioning(ctx, log, client)
+		networkInterfaces, err := networkInterfacesForProvisioning(ctx, reconcileContext, log, client)
 		if err != nil {
 			return fmt.Errorf("error generating network config for machine: %w", err)
 		}
@@ -122,17 +121,19 @@ func provisionVM(ctx context.Context, log *zap.SugaredLogger, client anxclient.C
 			reconcileContext.Machine.Name,
 			config.CPUs,
 			config.Memory,
-			config.Disks[0].Size,
+			config.DiskSize,
 			networkInterfaces,
+
 		)
 
-		vm.DiskType = config.Disks[0].PerformanceType
+		vm.DiskType = config.DiskPerformanceType
 
+		vm.AvailabilityZone = config.AvailabilityZone
 		if config.CPUPerformanceType != "" {
 			vm.CPUPerformanceType = config.CPUPerformanceType
 		}
 
-		for _, disk := range config.Disks[1:] {
+		for _, disk := range config.Disks {
 			vm.AdditionalDisks = append(vm.AdditionalDisks, anxvm.AdditionalDisk{
 				SizeGBs: disk.Size,
 				Type:    disk.PerformanceType,
@@ -157,23 +158,35 @@ func provisionVM(ctx context.Context, log *zap.SugaredLogger, client anxclient.C
 			}
 		}
 
-		// We generate a fresh SSH key but will never actually use it - we just want a valid public key to disable password authentication for our fresh VM.
-		sshKey, err := ssh.NewKey()
-		if err != nil {
-			return newError(common.CreateMachineError, "failed to generate ssh key: %v", err)
+		if len(config.SSHPublicKeys) > 0 {
+			// use provided SSH public key(s) if specified
+			vm.SSH = strings.Join(config.SSHPublicKeys, "\n")
+		} else {
+			// We generate a fresh SSH key but will never actually use it - we just want a valid public key to disable password authentication for our fresh VM.
+			sshKey, err := ssh.NewKey()
+			if err != nil {
+				return newError(common.CreateMachineError, "failed to generate ssh key: %v", err)
+			}
+			vm.SSH = sshKey.PublicKey
 		}
-		vm.SSH = sshKey.PublicKey
 
 		provisionResponse, err := vmAPI.Provisioning().VM().Provision(ctx, vm, false)
+		if err != nil {
+			meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+				Type:    ProvisionedType,
+				Status:  metav1.ConditionFalse,
+				Reason:  "ProvisioningError",
+				Message: fmt.Sprintf("instance provisioning failed: %v", err.Error()),
+			})
+			return newError(common.CreateMachineError, "instance provisioning failed: %v", err)
+		}
+
 		meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 			Type:    ProvisionedType,
 			Status:  metav1.ConditionFalse,
 			Reason:  "Provisioning",
 			Message: "provisioning request was sent",
 		})
-		if err != nil {
-			return newError(common.CreateMachineError, "instance provisioning failed: %v", err)
-		}
 
 		// we successfully sent a VM provisioning request to the API, we consider the IP as 'Bound' now
 		networkStatusMarkIPsBound(status)
@@ -197,23 +210,6 @@ func provisionVM(ctx context.Context, log *zap.SugaredLogger, client anxclient.C
 	return updateMachineStatus(reconcileContext.Machine, *status, reconcileContext.ProviderData.Update)
 }
 
-func isAlreadyProvisioning(ctx context.Context) bool {
-	status := getReconcileContext(ctx).Status
-	condition := meta.FindStatusCondition(status.Conditions, ProvisionedType)
-	lastChange := condition.LastTransitionTime.Time
-	const reasonInProvisioning = "InProvisioning"
-	if condition.Reason == reasonInProvisioning && time.Since(lastChange) > 5*time.Minute {
-		meta.SetStatusCondition(&status.Conditions, metav1.Condition{
-			Type:    ProvisionedType,
-			Reason:  "ReInitialising",
-			Message: "Could not find ongoing VM provisioning",
-			Status:  metav1.ConditionFalse,
-		})
-	}
-
-	return condition.Status == metav1.ConditionFalse && condition.Reason == reasonInProvisioning
-}
-
 func ensureConditions(status *anxtypes.ProviderStatus) {
 	conditions := [...]metav1.Condition{
 		{Type: ProvisionedType, Message: "", Status: metav1.ConditionUnknown, Reason: "Initialising"},
@@ -228,7 +224,7 @@ func ensureConditions(status *anxtypes.ProviderStatus) {
 // getTokenFromSpec got extracted from getConfig in order to circumvent it.
 //
 // That allowed us to reduce [Cleanup] to the bare minimum and allowing tear
-// downs if the template no longer exists. (ANXKUBE-1361)
+// downs if the template no longer exists (ANXKUBE-1361).
 func (p *provider) getTokenFromSpec(spec clusterv1alpha1.ProviderSpec) (string, error) {
 	if spec.Value == nil {
 		return "", fmt.Errorf("machine.spec.providerSpec.value is nil")
@@ -272,6 +268,8 @@ func (p *provider) getConfig(ctx context.Context, log *zap.SugaredLogger, provSp
 		return nil, nil, fmt.Errorf("error resolving config: %w", err)
 	}
 
+	resolvedConfig.SSHPublicKeys = pconfig.SSHPublicKeys
+
 	return resolvedConfig, pconfig, nil
 }
 
@@ -292,49 +290,65 @@ func (p *provider) Validate(ctx context.Context, log *zap.SugaredLogger, machine
 		return fmt.Errorf("failed to parse config: %w", err)
 	}
 
+	errs := make([]error, 0)
 	if config.Token == "" {
-		return errors.New("token not set")
+		errs = append(errs, errors.New("token not set"))
 	}
 
 	if config.CPUs == 0 {
-		return errors.New("cpu count is missing")
+		errs = append(errs, errors.New("cpu count is missing"))
 	}
 
-	if len(config.Disks) == 0 {
-		return errors.New("no disks configured")
+	if config.CPUPerformanceType == "" {
+		errs = append(errs, errors.New("cpu performance type is missing"))
 	}
 
-	for _, disk := range config.Disks {
+	if config.DiskSize == 0 {
+		errs = append(errs, errors.New("disk size is missing"))
+	}
+
+	if config.DiskPerformanceType == "" {
+		errs = append(errs, errors.New("disk performance type is missing"))
+	}
+
+	for i, disk := range config.Disks {
 		if disk.Size == 0 {
-			return errors.New("disk size is missing")
+			errs = append(errs, fmt.Errorf("disk size for disk %d is missing", i))
+		}
+		if disk.PerformanceType == "" {
+			errs = append(errs, fmt.Errorf("disk performance type for disk %d is missing", i))
 		}
 	}
 
 	if config.Memory == 0 {
-		return errors.New("memory size is missing")
+		errs = append(errs, errors.New("memory size is missing"))
 	}
 
 	if config.LocationID == "" {
-		return errors.New("location id is missing")
+		errs = append(errs, errors.New("location id is missing"))
 	}
 
 	if config.TemplateID == "" {
-		return errors.New("no valid template configured")
+		errs = append(errs, errors.New("no valid template configured"))
 	}
 
 	if len(config.Networks) == 0 {
-		return errors.New("no networks configured")
-	}
-
-	atLeastOneAddressSourceConfigured := false
-	for _, network := range config.Networks {
-		if len(network.Prefixes) > 0 {
-			atLeastOneAddressSourceConfigured = true
-			break
+		errs = append(errs, errors.New("no networks configured"))
+	} else {
+		atLeastOneAddressSourceConfigured := false
+		for _, network := range config.Networks {
+			if len(network.Prefixes) > 0 {
+				atLeastOneAddressSourceConfigured = true
+				break
+			}
+		}
+		if !atLeastOneAddressSourceConfigured {
+			errs = append(errs, errors.New("none of the configured networks define an address source, cannot create Machines without any IP"))
 		}
 	}
-	if !atLeastOneAddressSourceConfigured {
-		return errors.New("none of the configured networks define an address source, cannot create Machines without any IP")
+
+	if len(errs) > 0 {
+		return errors.Join(errs...)
 	}
 
 	return nil
@@ -366,7 +380,7 @@ func (p *provider) Get(ctx context.Context, log *zap.SugaredLogger, machine *clu
 	if status.InstanceID == "" {
 		p, err := vsphereAPI.Provisioning().Progress().Get(ctx, status.ProvisioningID)
 		if err != nil {
-			return nil, anexiaErrorToTerminalError(err, "failed to get provisioning progress")
+			return nil, wrapAnexiaError(err, "failed to get provisioning progress")
 		}
 
 		switch p.Status {
@@ -395,7 +409,7 @@ func (p *provider) Get(ctx context.Context, log *zap.SugaredLogger, machine *clu
 
 	info, err := vsphereAPI.Info().Get(timeoutCtx, status.InstanceID)
 	if err != nil {
-		return nil, anexiaErrorToTerminalError(err, "failed getting machine info")
+		return nil, wrapAnexiaError(err, "failed getting machine info")
 	}
 	instance.info = &info
 
@@ -446,15 +460,6 @@ func (p *provider) Cleanup(ctx context.Context, log *zap.SugaredLogger, machine 
 			// Only error if the error was not "not found"
 			if !errors.As(err, &respErr) || respErr.ErrorData.Code != http.StatusNotFound {
 				return false, newError(common.DeleteMachineError, "failed to delete machine: %v", err)
-			}
-
-			// good thinking checking for a "not found" error, but go-anxcloud does only
-			// return >= 500 && < 600 errors (:
-			// since that's the legacy client in go-anxcloud and the new one is not yet available,
-			// this will not be fixed there but we have a nice workaround here:
-
-			if response.Identifier == "" {
-				return true, nil
 			}
 		}
 		status.DeprovisioningID = response.Identifier
@@ -565,7 +570,7 @@ func updateMachineStatus(machine *clusterv1alpha1.Machine, status anxtypes.Provi
 	return nil
 }
 
-func anexiaErrorToTerminalError(err error, msg string) error {
+func wrapAnexiaError(err error, msg string) error {
 	var httpError api.HTTPError
 	if errors.As(err, &httpError) && (httpError.StatusCode() == http.StatusForbidden || httpError.StatusCode() == http.StatusUnauthorized) {
 		return cloudprovidererrors.TerminalError{
@@ -575,10 +580,16 @@ func anexiaErrorToTerminalError(err error, msg string) error {
 	}
 
 	var responseError *anxclient.ResponseError
-	if errors.As(err, &responseError) && (responseError.ErrorData.Code == http.StatusForbidden || responseError.ErrorData.Code == http.StatusUnauthorized) {
-		return cloudprovidererrors.TerminalError{
-			Reason:  common.InvalidConfigurationMachineError,
-			Message: "Request was rejected due to invalid credentials",
+	if errors.As(err, &responseError) {
+		if responseError.ErrorData.Code == http.StatusForbidden || responseError.ErrorData.Code == http.StatusUnauthorized {
+			return cloudprovidererrors.TerminalError{
+				Reason:  common.InvalidConfigurationMachineError,
+				Message: "Request was rejected due to invalid credentials",
+			}
+		}
+
+		if responseError.ErrorData.Code == http.StatusNotFound {
+			return cloudprovidererrors.ErrInstanceNotFound
 		}
 	}
 
