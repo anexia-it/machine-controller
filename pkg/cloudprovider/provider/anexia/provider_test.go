@@ -35,9 +35,7 @@ import (
 	"github.com/anexia/go-anxsdk/v1/vsphere"
 	"github.com/gophercloud/gophercloud/testhelper"
 	"go.anx.io/go-anxcloud/pkg/api"
-	"go.anx.io/go-anxcloud/pkg/api/mock"
 	anxcorev1 "go.anx.io/go-anxcloud/pkg/apis/core/v1"
-	anxvspherev1 "go.anx.io/go-anxcloud/pkg/apis/vsphere/v1"
 	anxclient "go.anx.io/go-anxcloud/pkg/client"
 	"go.anx.io/go-anxcloud/pkg/core"
 	"go.uber.org/zap"
@@ -68,12 +66,16 @@ func TestAnexiaProvider(t *testing.T) {
 	addressClient := sdkClient.V1().Ipam().Addresses()
 	log := zap.NewNop().Sugar()
 
-	a := mock.NewMockAPI()
-	a.FakeExisting(&anxvspherev1.Template{Identifier: "TEMPLATE-ID-OLD-BUILD", Name: testTemplateName, Build: "b01"})
-	a.FakeExisting(&anxvspherev1.Template{Identifier: "TEMPLATE-ID", Name: testTemplateName, Build: "b02"})
-	a.FakeExisting(&anxvspherev1.Template{Identifier: "WRONG-TEMPLATE-NAME", Name: "Wrong Template Name", Build: "b02"})
-	a.FakeExisting(&anxvspherev1.Template{Identifier: "TEMPLATE-ID-NO-NETWORK-CONFIG", Name: "no-network-config", Build: "b03"})
-	a.FakeExisting(&anxvspherev1.Template{Identifier: "TEMPLATE-ID-ADDITIONAL-DISKS", Name: "additional-disks", Build: "b03"})
+	testhelper.Mux.HandleFunc("/api/vsphere/v1/provisioning/templates.json/foo/templates", func(writer http.ResponseWriter, _ *http.Request) {
+		err := json.NewEncoder(writer).Encode([]vsphere.TemplateResponse{
+			{ID: "TEMPLATE-ID-OLD-BUILD", Name: testTemplateName, Build: "b01"},
+			{ID: "TEMPLATE-ID", Name: testTemplateName, Build: "b02"},
+			{ID: "WRONG-TEMPLATE-NAME", Name: "Wrong Template Name", Build: "b02"},
+			{ID: "TEMPLATE-ID-NO-NETWORK-CONFIG", Name: "no-network-config", Build: "b03"},
+			{ID: "TEMPLATE-ID-ADDITIONAL-DISKS", Name: "additional-disks", Build: "b03"},
+		})
+		testhelper.AssertNoErr(t, err)
+	})
 
 	t.Cleanup(func() {
 		testhelper.TeardownHTTP()
@@ -440,7 +442,7 @@ func TestAnexiaProvider(t *testing.T) {
 
 		provider := New(configvar.NewResolver(context.Background(), fake.NewClientBuilder().Build())).(*provider)
 		for _, testCase := range testCases {
-			templateID, err := provider.resolveTemplateID(context.Background(), a, testCase.config, "foo")
+			templateID, err := provider.resolveTemplateID(context.Background(), provisioningClient, testCase.config, "foo")
 			if testCase.expectedError != "" {
 				if err != nil {
 					testhelper.AssertErr(t, err)

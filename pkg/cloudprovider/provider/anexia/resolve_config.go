@@ -20,9 +20,7 @@ import (
 	"context"
 	"fmt"
 
-	"go.anx.io/go-anxcloud/pkg/api"
-	anxcorev1 "go.anx.io/go-anxcloud/pkg/apis/core/v1"
-	anxvspherev1 "go.anx.io/go-anxcloud/pkg/apis/vsphere/v1"
+	"github.com/anexia/go-anxsdk/v1/vsphere"
 	"go.uber.org/zap"
 
 	anxtypes "k8c.io/machine-controller/sdk/cloudprovider/anexia"
@@ -64,7 +62,7 @@ type resolvedConfig struct {
 	AvailabilityZone string
 }
 
-func (p *provider) resolveTemplateID(ctx context.Context, a api.API, config anxtypes.RawConfig, locationID string) (string, error) {
+func (p *provider) resolveTemplateID(ctx context.Context, provisioningClient *vsphere.ProvisioningClient, config anxtypes.RawConfig, locationID string) (string, error) {
 	templateName, err := p.configVarResolver.GetStringValue(config.Template)
 	if err != nil {
 		return "", fmt.Errorf("failed to get 'template': %w", err)
@@ -75,12 +73,12 @@ func (p *provider) resolveTemplateID(ctx context.Context, a api.API, config anxt
 		return "", fmt.Errorf("failed to get 'templateBuild': %w", err)
 	}
 
-	template, err := anxvspherev1.FindNamedTemplate(ctx, a, templateName, templateBuild, anxcorev1.Location{Identifier: locationID})
+	template, err := provisioningClient.FindNamedTemplate(ctx, locationID, templateName, templateBuild)
 	if err != nil {
 		return "", fmt.Errorf("failed to retrieve named template: %w", err)
 	}
 
-	return template.Identifier, nil
+	return template.ID, nil
 }
 
 func (p *provider) resolveNetworkConfig(log *zap.SugaredLogger, config anxtypes.RawConfig) (*[]resolvedNetwork, error) {
@@ -178,12 +176,9 @@ func (p *provider) resolveConfig(ctx context.Context, log *zap.SugaredLogger, co
 
 	// when "templateID" is not set, we expect "template" to be
 	if ret.TemplateID == "" {
-		a, _, err := getClient(nil)
-		if err != nil {
-			return nil, fmt.Errorf("failed initializing API clients: %w", err)
-		}
+		provisioningClient := getSDKClient(nil).V1().VSphere().Provisioning()
 
-		templateID, err := p.resolveTemplateID(ctx, a, config, ret.LocationID)
+		templateID, err := p.resolveTemplateID(ctx, provisioningClient, config, ret.LocationID)
 		if err != nil {
 			return nil, fmt.Errorf("failed retrieving template id from named template: %w", err)
 		}
