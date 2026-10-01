@@ -21,16 +21,15 @@ import (
 	"sync"
 	"time"
 
+	"github.com/anexia/go-anxsdk/v1/ipam"
 	"github.com/anexia/go-anxsdk/v1/vsphere"
-	anxclient "go.anx.io/go-anxcloud/pkg/client"
-	anxaddr "go.anx.io/go-anxcloud/pkg/ipam/address"
 	"go.uber.org/zap"
 
 	"k8c.io/machine-controller/sdk/apis/cluster/common"
 	anxtypes "k8c.io/machine-controller/sdk/cloudprovider/anexia"
 )
 
-func networkInterfacesForProvisioning(ctx context.Context, reconcileContext reconcileContext, log *zap.SugaredLogger, client anxclient.Client) ([]vsphere.ProvisioningRequestNetwork, error) {
+func networkInterfacesForProvisioning(ctx context.Context, reconcileContext reconcileContext, log *zap.SugaredLogger, addressClient *ipam.AddressClient) ([]vsphere.ProvisioningRequestNetwork, error) {
 	config := reconcileContext.Config
 	status := reconcileContext.Status
 
@@ -62,7 +61,7 @@ func networkInterfacesForProvisioning(ctx context.Context, reconcileContext reco
 				networkStatus.Addresses = make([]anxtypes.NetworkAddressStatus, len(network.Prefixes))
 			}
 
-			reservedIP, err := getIPAddress(ctx, reconcileContext, log, &network, prefix, &networkStatus.Addresses[prefixIndex], client)
+			reservedIP, err := getIPAddress(ctx, reconcileContext, log, &network, prefix, &networkStatus.Addresses[prefixIndex], addressClient)
 			if err != nil {
 				return nil, newError(common.CreateMachineError, "failed to reserve IP: %v", err)
 			}
@@ -95,7 +94,7 @@ func networkInterfacesForProvisioning(ctx context.Context, reconcileContext reco
 // again.. it's not too expensive of a Mutex.
 var _engsup3404mutex sync.Mutex
 
-func getIPAddress(ctx context.Context, reconcileContext reconcileContext, log *zap.SugaredLogger, network *resolvedNetwork, prefix string, status *anxtypes.NetworkAddressStatus, client anxclient.Client) (string, error) {
+func getIPAddress(ctx context.Context, reconcileContext reconcileContext, log *zap.SugaredLogger, network *resolvedNetwork, prefix string, status *anxtypes.NetworkAddressStatus, addressClient *ipam.AddressClient) (string, error) {
 	// only use IP if it is still unbound
 	if status.ReservedIP != "" && status.IPState == anxtypes.IPStateUnbound && (!status.IPProvisioningExpires.IsZero() && status.IPProvisioningExpires.After(time.Now())) {
 		log.Infow("Re-using already provisioned IP", "ip", status.ReservedIP)
@@ -106,15 +105,19 @@ func getIPAddress(ctx context.Context, reconcileContext reconcileContext, log *z
 	defer _engsup3404mutex.Unlock()
 
 	log.Info("Creating a new IP for machine")
-	addrAPI := anxaddr.NewAPI(client)
 	config := reconcileContext.Config
 
-	res, err := addrAPI.ReserveRandom(ctx, anxaddr.ReserveRandom{
-		LocationID:        config.LocationID,
-		VlanID:            network.VlanID,
-		PrefixID:          prefix,
-		ReservationPeriod: uint(anxtypes.IPProvisioningExpires / time.Second),
-		Count:             1,
+	var prefixIdentifier *string
+	if prefix != "" {
+		prefixIdentifier = new(prefix)
+	}
+
+	res, err := addressClient.ReserveRandom(ctx, ipam.AddressReserveRandomRequest{
+		LocationIdentifier: config.LocationID,
+		VlanIdentifier:     network.VlanID,
+		PrefixIdentifier:   prefixIdentifier,
+		ReservationPeriod:  new(int(anxtypes.IPProvisioningExpires / time.Second)),
+		Count:              1,
 	})
 	if err != nil {
 		return "", newError(common.InvalidConfigurationMachineError, "failed to reserve an ip address: %v", err)
@@ -124,7 +127,7 @@ func getIPAddress(ctx context.Context, reconcileContext reconcileContext, log *z
 		return "", newError(common.InsufficientResourcesMachineError, "no ip address is available for this machine")
 	}
 
-	ip := res.Data[0].Address
+	ip := res.Data[0].Text
 	status.ReservedIP = ip
 	status.IPState = anxtypes.IPStateUnbound
 	status.IPProvisioningExpires = time.Now().Add(anxtypes.IPProvisioningExpires)
