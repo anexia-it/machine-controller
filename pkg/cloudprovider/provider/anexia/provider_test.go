@@ -531,11 +531,6 @@ func TestValidate(t *testing.T) {
 
 	configCases := []ConfigTestCase{
 		{
-			Name:   "no token",
-			Config: hookableConfig(func(c *anxtypes.RawConfig) { c.Token.Value = "" }),
-			Error:  errors.New("token not set"),
-		},
-		{
 			Name:   "no cpu count",
 			Config: hookableConfig(func(c *anxtypes.RawConfig) { c.CPUs = 0 }),
 			Error:  errors.New("cpu count is missing"),
@@ -588,10 +583,10 @@ func TestValidate(t *testing.T) {
 		{
 			Name: "combined",
 			Config: hookableConfig(func(c *anxtypes.RawConfig) {
-				c.Token.Value = ""
 				c.CPUs = 0
+				c.CPUPerformanceType = ""
 			}),
-			Error: errors.Join(errors.New("token not set"), errors.New("cpu count is missing")),
+			Error: errors.Join(errors.New("cpu count is missing"), errors.New("cpu performance type is missing")),
 		},
 		{
 			Name:   "default is valid",
