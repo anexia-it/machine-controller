@@ -36,8 +36,7 @@ const (
 	IPStateUnbound        = "Unbound"
 	IPProvisioningExpires = 1800 * time.Second
 
-	VirtioNIC        = "virtio"
-	MachinePoweredOn = "poweredOn"
+	VirtioNIC = "virtio"
 )
 
 // RawDisk specifies a single disk, with some values maybe being fetched from secrets.

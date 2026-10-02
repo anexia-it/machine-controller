@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	anxsdkcommon "github.com/anexia/go-anxsdk/v1/common"
 	"github.com/gophercloud/gophercloud/testhelper"
 	"go.anx.io/go-anxcloud/pkg/api"
 	"go.anx.io/go-anxcloud/pkg/api/mock"
@@ -754,6 +755,38 @@ func Test_wrapAnexiaError(t *testing.T) {
 		err = wrapAnexiaError(err, "foo")
 		if ok := cloudprovidererrors.IsNotFound(err); !ok {
 			t.Errorf("unexpected error %#v, expected ErrInstanceNotFound", err)
+		}
+	})
+
+	t.Run("go-anxsdk 403 APIError should convert to TerminalError", func(t *testing.T) {
+		var err error = &anxsdkcommon.APIError{StatusCode: http.StatusForbidden}
+		err = wrapAnexiaError(err, "foo")
+		if ok, _, _ := cloudprovidererrors.IsTerminalError(err); !ok {
+			t.Errorf("unexpected error %#v, expected TerminalError", err)
+		}
+	})
+
+	t.Run("go-anxsdk 401 APIError should convert to TerminalError", func(t *testing.T) {
+		var err error = &anxsdkcommon.APIError{StatusCode: http.StatusUnauthorized}
+		err = wrapAnexiaError(err, "foo")
+		if ok, _, _ := cloudprovidererrors.IsTerminalError(err); !ok {
+			t.Errorf("unexpected error %#v, expected TerminalError", err)
+		}
+	})
+
+	t.Run("go-anxsdk 404 APIError should convert to NotFoundError", func(t *testing.T) {
+		var err error = &anxsdkcommon.APIError{StatusCode: http.StatusNotFound}
+		err = wrapAnexiaError(err, "foo")
+		if ok := cloudprovidererrors.IsNotFound(err); !ok {
+			t.Errorf("unexpected error %#v, expected ErrInstanceNotFound", err)
+		}
+	})
+
+	t.Run("go-anxsdk unspecific APIError shouldn't convert to TerminalError", func(t *testing.T) {
+		var err error = &anxsdkcommon.APIError{StatusCode: http.StatusInternalServerError}
+		err = wrapAnexiaError(err, "foo")
+		if ok, _, _ := cloudprovidererrors.IsTerminalError(err); ok {
+			t.Errorf("unexpected error %#v, expected no TerminalError", err)
 		}
 	})
 }

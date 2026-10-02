@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	anxsdkcommon "github.com/anexia/go-anxsdk/v1/common"
 	"go.anx.io/go-anxcloud/pkg/api"
 	anxclient "go.anx.io/go-anxcloud/pkg/client"
 	"go.anx.io/go-anxcloud/pkg/vsphere"
@@ -52,6 +53,8 @@ import (
 
 const (
 	ProvisionedType = "Provisioned"
+
+	invalidCredentialsMessage = "Request was rejected due to invalid credentials"
 )
 
 type provider struct {
@@ -370,11 +373,11 @@ func (p *provider) Get(ctx context.Context, log *zap.SugaredLogger, machine *clu
 	timeoutCtx, cancel := context.WithTimeout(ctx, anxtypes.GetRequestTimeout)
 	defer cancel()
 
-	info, err := vsphereAPI.Info().Get(timeoutCtx, status.InstanceID)
+	info, err := getSDKClient(&machine.Name).V1().VSphere().Info().Get(timeoutCtx, status.InstanceID)
 	if err != nil {
 		return nil, wrapAnexiaError(err, "failed getting machine info")
 	}
-	instance.info = &info
+	instance.info = info
 
 	return &instance, nil
 }
@@ -534,7 +537,7 @@ func wrapAnexiaError(err error, msg string) error {
 	if errors.As(err, &httpError) && (httpError.StatusCode() == http.StatusForbidden || httpError.StatusCode() == http.StatusUnauthorized) {
 		return cloudprovidererrors.TerminalError{
 			Reason:  common.InvalidConfigurationMachineError,
-			Message: "Request was rejected due to invalid credentials",
+			Message: invalidCredentialsMessage,
 		}
 	}
 
@@ -543,11 +546,25 @@ func wrapAnexiaError(err error, msg string) error {
 		if responseError.ErrorData.Code == http.StatusForbidden || responseError.ErrorData.Code == http.StatusUnauthorized {
 			return cloudprovidererrors.TerminalError{
 				Reason:  common.InvalidConfigurationMachineError,
-				Message: "Request was rejected due to invalid credentials",
+				Message: invalidCredentialsMessage,
 			}
 		}
 
 		if responseError.ErrorData.Code == http.StatusNotFound {
+			return cloudprovidererrors.ErrInstanceNotFound
+		}
+	}
+
+	var sdkError *anxsdkcommon.APIError
+	if errors.As(err, &sdkError) {
+		if sdkError.StatusCode == http.StatusForbidden || sdkError.StatusCode == http.StatusUnauthorized {
+			return cloudprovidererrors.TerminalError{
+				Reason:  common.InvalidConfigurationMachineError,
+				Message: invalidCredentialsMessage,
+			}
+		}
+
+		if sdkError.StatusCode == http.StatusNotFound {
 			return cloudprovidererrors.ErrInstanceNotFound
 		}
 	}
