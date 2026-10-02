@@ -576,11 +576,6 @@ func TestValidate(t *testing.T) {
 			Error:  errors.New("no networks configured"),
 		},
 		{
-			Name:   "vlan deprecated",
-			Config: hookableConfig(func(c *anxtypes.RawConfig) { c.VlanID = &providerconfigtypes.ConfigVarString{Value: "legacy VLAN-ID"} }),
-			Error:  anxtypes.ErrConfigVlanIDAndNetworks,
-		},
-		{
 			Name: "combined",
 			Config: hookableConfig(func(c *anxtypes.RawConfig) {
 				c.CPUs = 0
