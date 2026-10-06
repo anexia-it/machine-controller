@@ -26,6 +26,7 @@ import (
 
 	"github.com/anexia/go-anxsdk"
 	"github.com/anexia/go-anxsdk/v1/vsphere"
+	"github.com/gophercloud/gophercloud/testhelper"
 	"go.uber.org/zap"
 
 	cloudprovidertypes "k8c.io/machine-controller/pkg/cloudprovider/types"
@@ -314,6 +315,7 @@ func TestGetMarksProvisionedOnSuccess(t *testing.T) {
 	if updated.InstanceID != testInstanceID {
 		t.Errorf("expected the instance ID to be persisted, got %q", updated.InstanceID)
 	}
+	testhelper.AssertEquals(t, updated.ProvisioningID, "")
 
 	for _, condition := range updated.Conditions {
 		if condition.Type == ProvisionedType {
