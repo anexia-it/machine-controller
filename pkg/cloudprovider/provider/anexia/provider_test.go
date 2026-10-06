@@ -62,6 +62,8 @@ func TestAnexiaProvider(t *testing.T) {
 	log := zap.NewNop().Sugar()
 
 	testhelper.Mux.HandleFunc("/api/vsphere/v1/provisioning/templates.json/foo/templates", func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+
 		err := json.NewEncoder(writer).Encode([]vsphere.TemplateResponse{
 			{ID: "TEMPLATE-ID-OLD-BUILD", Name: testTemplateName, Build: "b01"},
 			{ID: "TEMPLATE-ID", Name: testTemplateName, Build: "b02"},
@@ -172,6 +174,7 @@ func TestAnexiaProvider(t *testing.T) {
 		}
 
 		testhelper.Mux.HandleFunc("/api/ipam/v1/address/reserve/ip/count.json", func(writer http.ResponseWriter, _ *http.Request) {
+			writer.Header().Set("Content-Type", "application/json")
 			err := json.NewEncoder(writer).Encode(paging.PagedResponse[ipam.AddressReserveResponseItem]{
 				Data: []ipam.AddressReserveResponseItem{
 					{
@@ -196,6 +199,7 @@ func TestAnexiaProvider(t *testing.T) {
 
 				testCase.AssertJSONBody(jsonBody)
 
+				writer.Header().Set("Content-Type", "application/json")
 				err := json.NewEncoder(writer).Encode(vsphere.ProvisioningResponse{
 					Progress:       100,
 					Errors:         nil,
@@ -208,6 +212,7 @@ func TestAnexiaProvider(t *testing.T) {
 			testhelper.Mux.HandleFunc(fmt.Sprintf("/api/vsphere/v1/provisioning/progress.json/%s", templateID), func(writer http.ResponseWriter, request *http.Request) {
 				testhelper.TestMethod(t, request, http.MethodGet)
 
+				writer.Header().Set("Content-Type", "application/json")
 				err := json.NewEncoder(writer).Encode(vsphere.ProvisioningProgress{
 					TaskIdentifier: templateID,
 					Queued:         false,
