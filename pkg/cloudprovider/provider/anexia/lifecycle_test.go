@@ -141,8 +141,6 @@ func TestIsTaskDoneKnownStatuses(t *testing.T) {
 	}
 }
 
-// Covers the error-shadowing bug: the API failure must reach the caller instead
-// of being replaced by the (successful) status update's nil error.
 func TestProvisionVMReportsProvisioningError(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/ipam/v1/address/reserve/ip/count.json", func(w http.ResponseWriter, _ *http.Request) {
@@ -161,11 +159,21 @@ func TestProvisionVMReportsProvisioningError(t *testing.T) {
 		}
 	})
 
-	p, _, _ := newTestProvider(t, mux)
+	p, _, data := newTestProvider(t, mux)
 	_ = p
 
+	var updated anxtypes.ProviderStatus
+	data.Update = func(m *clusterv1alpha1.Machine, mods ...cloudprovidertypes.MachineModifier) error {
+		for _, mod := range mods {
+			mod(m)
+		}
+		return json.Unmarshal(m.Status.ProviderStatus.Raw, &updated)
+	}
+
 	sdkClient := getSDKClient(nil)
-	reconcileCtx := hookableReconcileContext("LOCATION-ID", "TEMPLATE-ID", nil)
+	reconcileCtx := hookableReconcileContext("LOCATION-ID", "TEMPLATE-ID", func(r *reconcileContext) {
+		r.ProviderData.Update = data.Update
+	})
 
 	err := provisionVM(context.Background(), reconcileCtx, zap.NewNop().Sugar(),
 		sdkClient.V1().VSphere().Provisioning(), sdkClient.V1().Ipam().Addresses())
@@ -177,6 +185,9 @@ func TestProvisionVMReportsProvisioningError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "500") {
 		t.Errorf("error should carry the API failure, got %q", err.Error())
+	}
+	if updated.ProvisioningID != "" {
+		t.Errorf("provisioningID must not be set in case of error")
 	}
 }
 
