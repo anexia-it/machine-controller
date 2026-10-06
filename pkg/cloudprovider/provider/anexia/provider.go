@@ -106,7 +106,7 @@ func provisionVM(ctx context.Context, reconcileContext reconcileContext, log *za
 
 	status := reconcileContext.Status
 	if status.ProvisioningID == "" {
-		log.Info("Machine does not contain a provisioningID yet. Starting to provision")
+		log.Info("Machine does not contain a provisioningID. Starting to provision")
 
 		config := reconcileContext.Config
 		networkInterfaces, err := networkInterfacesForProvisioning(ctx, reconcileContext, log, addressClient)
@@ -350,7 +350,9 @@ func (p *provider) Get(ctx context.Context, log *zap.SugaredLogger, machine *clu
 		return &anexiaInstance{isDeleting: true}, nil
 	}
 
-	if status.InstanceID == "" {
+	// possible out-of-band delete of the worker node in the anexia engine
+	// CCM deletes the node but here the InstanceID stays
+	if status.InstanceID == "" || status.ProvisioningID != "" {
 		p, err := sdkClient.V1().VSphere().Provisioning().GetProvisioningProgress(ctx, status.ProvisioningID)
 		if err != nil {
 			return nil, wrapAnexiaError(err, "failed to get provisioning progress")
@@ -364,6 +366,10 @@ func (p *provider) Get(ctx context.Context, log *zap.SugaredLogger, machine *clu
 		// See also: VSD-1473
 		case vsphere.ProvisioningStatusSuccess:
 			status.InstanceID = p.VMIdentifier
+
+			// clear ProvisioningID after successfully provisioned
+			// if an out-of-band delete happens the ProvisioningID has to be empty in order to create a new machine inside Create() instead of waiting endlessly
+			status.ProvisioningID = ""
 			meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 				Type:    ProvisionedType,
 				Status:  metav1.ConditionTrue,
