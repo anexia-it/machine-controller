@@ -31,7 +31,22 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-type jsonObject = map[string]interface{}
+// Fixture values shared across the test files in this package.
+const (
+	testMachineName    = "TestMachine"
+	testTaskID         = "TASK-ID"
+	testInstanceID     = "INSTANCE-ID"
+	testProvisioningID = "PROVISIONING-ID"
+	testIPIdentifier   = "IP-ID"
+	testPrefixID       = "0987654"
+
+	testPublicIPv4  = "8.8.8.8"
+	testPublicIPv6  = "2001:db8::2"
+	testPrivateIPv4 = "10.0.0.2"
+	testPrivateIPv6 = "fda0:23::2"
+)
+
+type jsonObject = map[string]any
 
 type ProvisionVMTestCase struct {
 	ReconcileContext reconcileContext

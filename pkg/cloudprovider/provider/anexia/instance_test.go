@@ -41,14 +41,14 @@ func TestAnexiaInstance(t *testing.T) {
 
 	t.Run("instance with only reservedAddresses set", func(t *testing.T) {
 		instance := anexiaInstance{
-			reservedAddresses: []string{"10.0.0.2", "fda0:23::2", "8.8.8.8", "2001:db8::2"},
+			reservedAddresses: []string{testPrivateIPv4, testPrivateIPv6, testPublicIPv4, testPublicIPv6},
 		}
 
 		addressCheck(t, "expected addresses", &instance, map[string]corev1.NodeAddressType{
-			"10.0.0.2":    corev1.NodeInternalIP,
-			"fda0:23::2":  corev1.NodeInternalIP,
-			"8.8.8.8":     corev1.NodeExternalIP,
-			"2001:db8::2": corev1.NodeExternalIP,
+			testPrivateIPv4: corev1.NodeInternalIP,
+			testPrivateIPv6: corev1.NodeInternalIP,
+			testPublicIPv4:  corev1.NodeExternalIP,
+			testPublicIPv6:  corev1.NodeExternalIP,
 		})
 	})
 
@@ -57,71 +57,71 @@ func TestAnexiaInstance(t *testing.T) {
 			info: &vsphere.InfoGetResponse{
 				Network: []vsphere.InfoGetResponseNetwork{
 					{
-						IPsv4: []string{"10.0.0.2"},
-						IPsv6: []string{"fda0:23::2"},
+						IPsv4: []string{testPrivateIPv4},
+						IPsv6: []string{testPrivateIPv6},
 					},
 					{
-						IPsv4: []string{"8.8.8.8"},
-						IPsv6: []string{"2001:db8::2"},
+						IPsv4: []string{testPublicIPv4},
+						IPsv6: []string{testPublicIPv6},
 					},
 				},
 			},
 		}
 
 		addressCheck(t, "expected addresses", &instance, map[string]corev1.NodeAddressType{
-			"10.0.0.2":    corev1.NodeInternalIP,
-			"fda0:23::2":  corev1.NodeInternalIP,
-			"8.8.8.8":     corev1.NodeExternalIP,
-			"2001:db8::2": corev1.NodeExternalIP,
+			testPrivateIPv4: corev1.NodeInternalIP,
+			testPrivateIPv6: corev1.NodeInternalIP,
+			testPublicIPv4:  corev1.NodeExternalIP,
+			testPublicIPv6:  corev1.NodeExternalIP,
 		})
 	})
 
 	t.Run("instance with both reservedAddresses and info set, full overlapping set", func(t *testing.T) {
 		instance := anexiaInstance{
-			reservedAddresses: []string{"10.0.0.2", "fda0:23::2", "8.8.8.8", "2001:db8::2"},
+			reservedAddresses: []string{testPrivateIPv4, testPrivateIPv6, testPublicIPv4, testPublicIPv6},
 			info: &vsphere.InfoGetResponse{
 				Network: []vsphere.InfoGetResponseNetwork{
 					{
-						IPsv4: []string{"10.0.0.2"},
-						IPsv6: []string{"fda0:23::2"},
+						IPsv4: []string{testPrivateIPv4},
+						IPsv6: []string{testPrivateIPv6},
 					},
 					{
-						IPsv4: []string{"8.8.8.8"},
-						IPsv6: []string{"2001:db8::2"},
+						IPsv4: []string{testPublicIPv4},
+						IPsv6: []string{testPublicIPv6},
 					},
 				},
 			},
 		}
 
 		addressCheck(t, "expected addresses", &instance, map[string]corev1.NodeAddressType{
-			"10.0.0.2":    corev1.NodeInternalIP,
-			"fda0:23::2":  corev1.NodeInternalIP,
-			"8.8.8.8":     corev1.NodeExternalIP,
-			"2001:db8::2": corev1.NodeExternalIP,
+			testPrivateIPv4: corev1.NodeInternalIP,
+			testPrivateIPv6: corev1.NodeInternalIP,
+			testPublicIPv4:  corev1.NodeExternalIP,
+			testPublicIPv6:  corev1.NodeExternalIP,
 		})
 	})
 
 	t.Run("instance with both reservedAddresses and info set, some overlap, each adding some", func(t *testing.T) {
 		instance := anexiaInstance{
-			reservedAddresses: []string{"10.0.0.2", "8.8.8.8", "2001:db8::2"},
+			reservedAddresses: []string{testPrivateIPv4, testPublicIPv4, testPublicIPv6},
 			info: &vsphere.InfoGetResponse{
 				Network: []vsphere.InfoGetResponseNetwork{
 					{
-						IPsv4: []string{"10.0.0.2"},
-						IPsv6: []string{"fda0:23::2"},
+						IPsv4: []string{testPrivateIPv4},
+						IPsv6: []string{testPrivateIPv6},
 					},
 					{
-						IPsv6: []string{"2001:db8::2"},
+						IPsv6: []string{testPublicIPv6},
 					},
 				},
 			},
 		}
 
 		addressCheck(t, "expected addresses", &instance, map[string]corev1.NodeAddressType{
-			"10.0.0.2":    corev1.NodeInternalIP,
-			"fda0:23::2":  corev1.NodeInternalIP,
-			"8.8.8.8":     corev1.NodeExternalIP,
-			"2001:db8::2": corev1.NodeExternalIP,
+			testPrivateIPv4: corev1.NodeInternalIP,
+			testPrivateIPv6: corev1.NodeInternalIP,
+			testPublicIPv4:  corev1.NodeExternalIP,
+			testPublicIPv6:  corev1.NodeExternalIP,
 		})
 	})
 }
