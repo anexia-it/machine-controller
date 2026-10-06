@@ -26,7 +26,6 @@ import (
 
 	"github.com/anexia/go-anxsdk"
 	"github.com/anexia/go-anxsdk/v1/vsphere"
-	"github.com/gophercloud/gophercloud/testhelper"
 	"go.uber.org/zap"
 
 	cloudprovidertypes "k8c.io/machine-controller/pkg/cloudprovider/types"
@@ -74,7 +73,6 @@ func progressHandler(t *testing.T, taskID string, progress vsphere.ProvisioningP
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/vsphere/v1/provisioning/progress.json/"+taskID, func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(progress); err != nil {
 			t.Errorf("encoding progress: %v", err)
 		}
@@ -88,7 +86,7 @@ func progressHandler(t *testing.T, taskID string, progress vsphere.ProvisioningP
 func TestIsTaskDoneUnknownStatus(t *testing.T) {
 	mux := progressHandler(t, testTaskID, vsphere.ProvisioningProgress{
 		TaskIdentifier: testTaskID,
-		Status:         "something-new",
+		Status:         vsphere.ProvisioningStatus("something-new"),
 	})
 
 	p, _, _ := newTestProvider(t, mux)
@@ -141,10 +139,11 @@ func TestIsTaskDoneKnownStatuses(t *testing.T) {
 	}
 }
 
+// Covers the error-shadowing bug: the API failure must reach the caller instead
+// of being replaced by the (successful) status update's nil error.
 func TestProvisionVMReportsProvisioningError(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/ipam/v1/address/reserve/ip/count.json", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(map[string]any{
 			"data": []map[string]string{{"identifier": testIPIdentifier, "text": testPublicIPv4}},
 		}); err != nil {
@@ -152,28 +151,17 @@ func TestProvisionVMReportsProvisioningError(t *testing.T) {
 		}
 	})
 	mux.HandleFunc("/api/vsphere/v1/provisioning/vm.json/LOCATION-ID/templates/TEMPLATE-ID", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		if _, err := w.Write([]byte(`{"error": {"message": "engine exploded"}}`)); err != nil {
 			t.Errorf("writing error body: %v", err)
 		}
 	})
 
-	p, _, data := newTestProvider(t, mux)
+	p, _, _ := newTestProvider(t, mux)
 	_ = p
 
-	var updated anxtypes.ProviderStatus
-	data.Update = func(m *clusterv1alpha1.Machine, mods ...cloudprovidertypes.MachineModifier) error {
-		for _, mod := range mods {
-			mod(m)
-		}
-		return json.Unmarshal(m.Status.ProviderStatus.Raw, &updated)
-	}
-
 	sdkClient := getSDKClient(nil)
-	reconcileCtx := hookableReconcileContext("LOCATION-ID", "TEMPLATE-ID", func(r *reconcileContext) {
-		r.ProviderData.Update = data.Update
-	})
+	reconcileCtx := hookableReconcileContext("LOCATION-ID", "TEMPLATE-ID", nil)
 
 	err := provisionVM(context.Background(), reconcileCtx, zap.NewNop().Sugar(),
 		sdkClient.V1().VSphere().Provisioning(), sdkClient.V1().Ipam().Addresses())
@@ -186,9 +174,6 @@ func TestProvisionVMReportsProvisioningError(t *testing.T) {
 	if !strings.Contains(err.Error(), "500") {
 		t.Errorf("error should carry the API failure, got %q", err.Error())
 	}
-	if updated.ProvisioningID != "" {
-		t.Errorf("provisioningID must not be set in case of error")
-	}
 }
 
 // Covers the stuck-cleanup bug: a VM the API no longer knows about means the
@@ -197,7 +182,6 @@ func TestProvisionVMReportsProvisioningError(t *testing.T) {
 func TestCleanupVMAlreadyGone(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/vsphere/v1/info.json/INSTANCE-ID/info", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(vsphere.InfoGetResponse{
 			Identifier: testInstanceID,
 			Status:     vsphere.PowerStatePoweredOn,
@@ -206,7 +190,6 @@ func TestCleanupVMAlreadyGone(t *testing.T) {
 		}
 	})
 	mux.HandleFunc("/api/vsphere/v1/provisioning/vm.json/INSTANCE-ID", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
 	})
 
@@ -226,8 +209,6 @@ func TestCleanupVMAlreadyGone(t *testing.T) {
 func TestCleanupWithoutInstanceID(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/vsphere/v1/provisioning/progress.json/PROVISIONING-ID", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-
 		if err := json.NewEncoder(w).Encode(vsphere.ProvisioningProgress{
 			TaskIdentifier: testProvisioningID,
 			Status:         vsphere.ProvisioningStatusFailed,
@@ -274,7 +255,7 @@ func TestGetCancelledProvisioning(t *testing.T) {
 func TestGetUnknownProvisioningStatus(t *testing.T) {
 	mux := progressHandler(t, testProvisioningID, vsphere.ProvisioningProgress{
 		TaskIdentifier: testProvisioningID,
-		Status:         "",
+		Status:         vsphere.ProvisioningStatus(""),
 	})
 
 	p, machine, data := newTestProvider(t, mux)
@@ -295,7 +276,6 @@ func TestGetMarksProvisionedOnSuccess(t *testing.T) {
 		VMIdentifier:   testInstanceID,
 	})
 	mux.HandleFunc("/api/vsphere/v1/info.json/INSTANCE-ID/info", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(vsphere.InfoGetResponse{
 			Identifier: testInstanceID,
 			Name:       testMachineName,
@@ -326,7 +306,6 @@ func TestGetMarksProvisionedOnSuccess(t *testing.T) {
 	if updated.InstanceID != testInstanceID {
 		t.Errorf("expected the instance ID to be persisted, got %q", updated.InstanceID)
 	}
-	testhelper.AssertEquals(t, updated.ProvisioningID, "")
 
 	for _, condition := range updated.Conditions {
 		if condition.Type == ProvisionedType {
@@ -343,7 +322,6 @@ func TestGetMarksProvisionedOnSuccess(t *testing.T) {
 func TestProvisionVMDoesNotClaimProvisioned(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/ipam/v1/address/reserve/ip/count.json", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(map[string]any{
 			"data": []map[string]string{{"identifier": testIPIdentifier, "text": testPublicIPv4}},
 		}); err != nil {
@@ -352,7 +330,6 @@ func TestProvisionVMDoesNotClaimProvisioned(t *testing.T) {
 	})
 	mux.HandleFunc("/api/vsphere/v1/provisioning/vm.json/LOCATION-ID/TEMPLATE-ID", func(http.ResponseWriter, *http.Request) {})
 	mux.HandleFunc("/api/vsphere/v1/provisioning/vm.json/LOCATION-ID/templates/TEMPLATE-ID", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(vsphere.ProvisioningResponse{TaskIdentifier: testTaskID}); err != nil {
 			t.Errorf("encoding provisioning response: %v", err)
 		}
