@@ -144,10 +144,6 @@ func provisionVM(ctx context.Context, reconcileContext reconcileContext, log *za
 		providerCfg := reconcileContext.ProviderConfig
 		if providerCfg.Network != nil {
 			for index, dnsServer := range providerCfg.Network.DNS.Servers {
-				if dnsServer == "" {
-					continue
-				}
-
 				switch index {
 				case 0:
 					request.DNS1 = new(dnsServer)

@@ -86,12 +86,12 @@ func TestAnexiaProvider(t *testing.T) {
 			{
 				// Provision a generic VM with some custom dns entries
 				ReconcileContext: hookableReconcileContext("LOCATION-ID", "TEMPLATE-ID", func(rc *reconcileContext) {
+					rc.UserData = "#!/usr/bin/bash\n echo asdf"
 					rc.ProviderConfig = &providerconfigtypes.Config{
 						Network: &providerconfigtypes.NetworkConfig{
 							DNS: providerconfigtypes.DNSConfig{
 								Servers: []string{
 									"1.1.1.1",
-									"",
 									"192.168.0.1",
 									"192.168.0.2",
 									"192.168.0.3",
@@ -101,21 +101,23 @@ func TestAnexiaProvider(t *testing.T) {
 					}
 				}),
 				AssertJSONBody: func(jsonBody jsonObject) {
-					testhelper.AssertEquals(t, jsonBody["cpu_performance_type"], "performance")
+					testhelper.AssertEquals(t, jsonBody["cpu_performance_type"], "enterprise")
+					testhelper.AssertEquals(t, jsonBody["disk_type"], "ENT4")
 					testhelper.AssertEquals(t, jsonBody["hostname"], testMachineName)
 					testhelper.AssertEquals(t, jsonBody["memory_mb"], json.Number("5"))
 
 					testhelper.AssertEquals(t, jsonBody["dns1"], "1.1.1.1")
-					_, exists := jsonBody["dns2"]
-					testhelper.AssertEquals(t, exists, false)
-					testhelper.AssertEquals(t, jsonBody["dns3"], "192.168.0.1")
-					testhelper.AssertEquals(t, jsonBody["dns4"], "192.168.0.2")
+					testhelper.AssertEquals(t, jsonBody["dns2"], "192.168.0.1")
+					testhelper.AssertEquals(t, jsonBody["dns3"], "192.168.0.2")
+					testhelper.AssertEquals(t, jsonBody["dns4"], "192.168.0.3")
 
 					networkArray := jsonBody["network"].([]any)
 					networkObject := networkArray[0].(jsonObject)
 					testhelper.AssertEquals(t, networkObject["vlan"], "VLAN-ID")
 					testhelper.AssertEquals(t, networkObject["nic_type"], "virtio")
 					testhelper.AssertEquals(t, networkObject["ips"].([]any)[0], testPublicIPv4)
+					testhelper.AssertEquals(t, jsonBody["script"], "IyEvdXNyL2Jpbi9iYXNoCiBlY2hvIGFzZGY=") // user-data script as base64
+					testhelper.AssertEquals(t, jsonBody["ssh"], "ssh-ed25519 AAAAC3Nza test1\nssh-rsa AAAAB3NzaC1yc test2")
 				},
 			},
 			{
