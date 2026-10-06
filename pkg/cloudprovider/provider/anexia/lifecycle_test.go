@@ -73,6 +73,7 @@ func progressHandler(t *testing.T, taskID string, progress vsphere.ProvisioningP
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/vsphere/v1/provisioning/progress.json/"+taskID, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(progress); err != nil {
 			t.Errorf("encoding progress: %v", err)
 		}
@@ -86,7 +87,7 @@ func progressHandler(t *testing.T, taskID string, progress vsphere.ProvisioningP
 func TestIsTaskDoneUnknownStatus(t *testing.T) {
 	mux := progressHandler(t, testTaskID, vsphere.ProvisioningProgress{
 		TaskIdentifier: testTaskID,
-		Status:         vsphere.ProvisioningStatus("something-new"),
+		Status:         "something-new",
 	})
 
 	p, _, _ := newTestProvider(t, mux)
@@ -144,6 +145,7 @@ func TestIsTaskDoneKnownStatuses(t *testing.T) {
 func TestProvisionVMReportsProvisioningError(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/ipam/v1/address/reserve/ip/count.json", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(map[string]any{
 			"data": []map[string]string{{"identifier": testIPIdentifier, "text": testPublicIPv4}},
 		}); err != nil {
@@ -151,6 +153,7 @@ func TestProvisionVMReportsProvisioningError(t *testing.T) {
 		}
 	})
 	mux.HandleFunc("/api/vsphere/v1/provisioning/vm.json/LOCATION-ID/templates/TEMPLATE-ID", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		if _, err := w.Write([]byte(`{"error": {"message": "engine exploded"}}`)); err != nil {
 			t.Errorf("writing error body: %v", err)
@@ -182,6 +185,7 @@ func TestProvisionVMReportsProvisioningError(t *testing.T) {
 func TestCleanupVMAlreadyGone(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/vsphere/v1/info.json/INSTANCE-ID/info", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(vsphere.InfoGetResponse{
 			Identifier: testInstanceID,
 			Status:     vsphere.PowerStatePoweredOn,
@@ -190,6 +194,7 @@ func TestCleanupVMAlreadyGone(t *testing.T) {
 		}
 	})
 	mux.HandleFunc("/api/vsphere/v1/provisioning/vm.json/INSTANCE-ID", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
 	})
 
@@ -209,6 +214,8 @@ func TestCleanupVMAlreadyGone(t *testing.T) {
 func TestCleanupWithoutInstanceID(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/vsphere/v1/provisioning/progress.json/PROVISIONING-ID", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
 		if err := json.NewEncoder(w).Encode(vsphere.ProvisioningProgress{
 			TaskIdentifier: testProvisioningID,
 			Status:         vsphere.ProvisioningStatusFailed,
@@ -255,7 +262,7 @@ func TestGetCancelledProvisioning(t *testing.T) {
 func TestGetUnknownProvisioningStatus(t *testing.T) {
 	mux := progressHandler(t, testProvisioningID, vsphere.ProvisioningProgress{
 		TaskIdentifier: testProvisioningID,
-		Status:         vsphere.ProvisioningStatus(""),
+		Status:         "",
 	})
 
 	p, machine, data := newTestProvider(t, mux)
@@ -276,6 +283,7 @@ func TestGetMarksProvisionedOnSuccess(t *testing.T) {
 		VMIdentifier:   testInstanceID,
 	})
 	mux.HandleFunc("/api/vsphere/v1/info.json/INSTANCE-ID/info", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(vsphere.InfoGetResponse{
 			Identifier: testInstanceID,
 			Name:       testMachineName,
@@ -322,6 +330,7 @@ func TestGetMarksProvisionedOnSuccess(t *testing.T) {
 func TestProvisionVMDoesNotClaimProvisioned(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/ipam/v1/address/reserve/ip/count.json", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(map[string]any{
 			"data": []map[string]string{{"identifier": testIPIdentifier, "text": testPublicIPv4}},
 		}); err != nil {
@@ -330,6 +339,7 @@ func TestProvisionVMDoesNotClaimProvisioned(t *testing.T) {
 	})
 	mux.HandleFunc("/api/vsphere/v1/provisioning/vm.json/LOCATION-ID/TEMPLATE-ID", func(http.ResponseWriter, *http.Request) {})
 	mux.HandleFunc("/api/vsphere/v1/provisioning/vm.json/LOCATION-ID/templates/TEMPLATE-ID", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(vsphere.ProvisioningResponse{TaskIdentifier: testTaskID}); err != nil {
 			t.Errorf("encoding provisioning response: %v", err)
 		}
