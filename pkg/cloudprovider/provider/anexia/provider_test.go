@@ -57,7 +57,6 @@ func TestAnexiaProvider(t *testing.T) {
 	testhelper.SetupHTTP()
 	server := httptest.NewServer(testhelper.Mux)
 	sdkClient := anxsdk.NewClient(anxsdk.WithBaseURL(server.URL), anxsdk.WithHTTPClient(server.Client()))
-	provisioningClient := sdkClient.V1().VSphere().Provisioning()
 	addressClient := sdkClient.V1().Ipam().Addresses()
 	log := zap.NewNop().Sugar()
 
@@ -226,7 +225,7 @@ func TestAnexiaProvider(t *testing.T) {
 				testhelper.AssertNoErr(t, err)
 			})
 
-			err := provisionVM(context.Background(), testCase.ReconcileContext, log, provisioningClient, addressClient)
+			err := provisionVM(context.Background(), testCase.ReconcileContext, log, sdkClient)
 			testhelper.AssertNoErr(t, err)
 		}
 	})
@@ -444,7 +443,7 @@ func TestAnexiaProvider(t *testing.T) {
 
 		provider := New(configvar.NewResolver(context.Background(), fake.NewClientBuilder().Build())).(*provider)
 		for _, testCase := range testCases {
-			templateID, err := provider.resolveTemplateID(context.Background(), provisioningClient, testCase.config, "foo")
+			templateID, err := provider.resolveTemplateID(context.Background(), sdkClient.V1().VSphere().Provisioning(), testCase.config, "foo")
 			if testCase.expectedError != "" {
 				if err != nil {
 					testhelper.AssertErr(t, err)

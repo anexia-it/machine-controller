@@ -175,8 +175,7 @@ func TestProvisionVMReportsProvisioningError(t *testing.T) {
 		r.ProviderData.Update = data.Update
 	})
 
-	err := provisionVM(context.Background(), reconcileCtx, zap.NewNop().Sugar(),
-		sdkClient.V1().VSphere().Provisioning(), sdkClient.V1().Ipam().Addresses())
+	err := provisionVM(context.Background(), reconcileCtx, zap.NewNop().Sugar(), sdkClient)
 	if err == nil {
 		t.Fatal("expected an error when provisioning fails")
 	}
@@ -364,8 +363,7 @@ func TestProvisionVMDoesNotClaimProvisioned(t *testing.T) {
 	sdkClient := getSDKClient(nil)
 	reconcileCtx := hookableReconcileContext("LOCATION-ID", "TEMPLATE-ID", nil)
 
-	if err := provisionVM(context.Background(), reconcileCtx, zap.NewNop().Sugar(),
-		sdkClient.V1().VSphere().Provisioning(), sdkClient.V1().Ipam().Addresses()); err != nil {
+	if err := provisionVM(context.Background(), reconcileCtx, zap.NewNop().Sugar(), sdkClient); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
