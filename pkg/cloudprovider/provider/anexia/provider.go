@@ -27,6 +27,7 @@ import (
 	"time"
 
 	anxsdkcommon "github.com/anexia/go-anxsdk/v1/common"
+	"github.com/anexia/go-anxsdk/v1/ipam"
 	"github.com/anexia/go-anxsdk/v1/vsphere"
 	"go.anx.io/go-anxcloud/pkg/api"
 	anxclient "go.anx.io/go-anxcloud/pkg/client"
@@ -84,11 +85,7 @@ func (p *provider) Create(ctx context.Context, log *zap.SugaredLogger, machine *
 		Machine:        machine,
 	}
 
-	_, client, err := getClient(&machine.Name)
-	if err != nil {
-		return nil, err
-	}
-	provisioningClient := getSDKClient(&machine.Name).V1().VSphere().Provisioning()
+	sdkClient := getSDKClient(&machine.Name)
 
 	// make sure status is reflected in Machine Object
 	defer func() {
@@ -97,14 +94,14 @@ func (p *provider) Create(ctx context.Context, log *zap.SugaredLogger, machine *
 	}()
 
 	// provision machine
-	err = provisionVM(ctx, reconcileCtx, log, client, provisioningClient)
+	err = provisionVM(ctx, reconcileCtx, log, sdkClient.V1().VSphere().Provisioning(), sdkClient.V1().Ipam().Addresses())
 	if err != nil {
 		return nil, wrapAnexiaError(err, "failed waiting for vm provisioning")
 	}
 	return p.Get(ctx, log, machine, data)
 }
 
-func provisionVM(ctx context.Context, reconcileContext reconcileContext, log *zap.SugaredLogger, client anxclient.Client, provisioningClient *vsphere.ProvisioningClient) error {
+func provisionVM(ctx context.Context, reconcileContext reconcileContext, log *zap.SugaredLogger, provisioningClient *vsphere.ProvisioningClient, addressClient *ipam.AddressClient) error {
 	ctx, cancel := context.WithTimeout(ctx, anxtypes.CreateRequestTimeout)
 	defer cancel()
 
@@ -113,7 +110,7 @@ func provisionVM(ctx context.Context, reconcileContext reconcileContext, log *za
 		log.Info("Machine does not contain a provisioningID yet. Starting to provision")
 
 		config := reconcileContext.Config
-		networkInterfaces, err := networkInterfacesForProvisioning(ctx, reconcileContext, log, client)
+		networkInterfaces, err := networkInterfacesForProvisioning(ctx, reconcileContext, log, addressClient)
 		if err != nil {
 			return fmt.Errorf("error generating network config for machine: %w", err)
 		}

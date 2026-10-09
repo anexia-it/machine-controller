@@ -29,7 +29,9 @@ import (
 	"time"
 
 	"github.com/anexia/go-anxsdk"
+	"github.com/anexia/go-anxsdk/paging"
 	anxsdkcommon "github.com/anexia/go-anxsdk/v1/common"
+	"github.com/anexia/go-anxsdk/v1/ipam"
 	"github.com/anexia/go-anxsdk/v1/vsphere"
 	"github.com/gophercloud/gophercloud/testhelper"
 	"go.anx.io/go-anxcloud/pkg/api"
@@ -38,7 +40,6 @@ import (
 	anxvspherev1 "go.anx.io/go-anxcloud/pkg/apis/vsphere/v1"
 	anxclient "go.anx.io/go-anxcloud/pkg/client"
 	"go.anx.io/go-anxcloud/pkg/core"
-	"go.anx.io/go-anxcloud/pkg/ipam/address"
 	"go.uber.org/zap"
 
 	cloudprovidererrors "k8c.io/machine-controller/pkg/cloudprovider/errors"
@@ -61,9 +62,10 @@ const (
 
 func TestAnexiaProvider(t *testing.T) {
 	testhelper.SetupHTTP()
-	client, server := anxclient.NewTestClient(nil, testhelper.Mux)
+	_, server := anxclient.NewTestClient(nil, testhelper.Mux)
 	sdkClient := anxsdk.NewClient(anxsdk.WithBaseURL(server.URL), anxsdk.WithHTTPClient(server.Client()))
 	provisioningClient := sdkClient.V1().VSphere().Provisioning()
+	addressClient := sdkClient.V1().Ipam().Addresses()
 	log := zap.NewNop().Sugar()
 
 	a := mock.NewMockAPI()
@@ -172,12 +174,12 @@ func TestAnexiaProvider(t *testing.T) {
 			},
 		}
 
-		testhelper.Mux.HandleFunc("/api/ipam/v1/address/reserve/ip/count.json", func(writer http.ResponseWriter, _ *http.Request) {
-			err := json.NewEncoder(writer).Encode(address.ReserveRandomSummary{
-				Data: []address.ReservedIP{
+		testhelper.Mux.HandleFunc("/api/ipam/v1/address/ip/count.json", func(writer http.ResponseWriter, _ *http.Request) {
+			err := json.NewEncoder(writer).Encode(paging.PagedResponse[ipam.AddressReserveResponseItem]{
+				Data: []ipam.AddressReserveResponseItem{
 					{
-						ID:      "IP-ID",
-						Address: "8.8.8.8",
+						Identifier: "IP-ID",
+						Text:       "8.8.8.8",
 					},
 				},
 			})
@@ -220,7 +222,7 @@ func TestAnexiaProvider(t *testing.T) {
 				testhelper.AssertNoErr(t, err)
 			})
 
-			err := provisionVM(context.Background(), testCase.ReconcileContext, log, client, provisioningClient)
+			err := provisionVM(context.Background(), testCase.ReconcileContext, log, provisioningClient, addressClient)
 			testhelper.AssertNoErr(t, err)
 		}
 	})
@@ -506,7 +508,7 @@ func TestAnexiaProvider(t *testing.T) {
 			providerStatus.Networks[0].Addresses[0].ReservedIP = expectedIP
 			providerStatus.Networks[0].Addresses[0].IPState = anxtypes.IPStateUnbound
 			providerStatus.Networks[0].Addresses[0].IPProvisioningExpires = time.Now().Add(anxtypes.IPProvisioningExpires)
-			reservedIP, err := getIPAddress(context.Background(), reconcileCtx, log, &resolvedNetwork{}, "Prefix-ID", &providerStatus.Networks[0].Addresses[0], client)
+			reservedIP, err := getIPAddress(context.Background(), reconcileCtx, log, &resolvedNetwork{}, "Prefix-ID", &providerStatus.Networks[0].Addresses[0], addressClient)
 			testhelper.AssertNoErr(t, err)
 			testhelper.AssertEquals(t, expectedIP, reservedIP)
 		})
