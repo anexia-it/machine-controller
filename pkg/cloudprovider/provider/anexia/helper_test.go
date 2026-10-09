@@ -34,12 +34,14 @@ import (
 
 // Fixture values shared across the test files in this package.
 const (
-	testMachineName    = "TestMachine"
-	testTaskID         = "TASK-ID"
-	testInstanceID     = "INSTANCE-ID"
-	testProvisioningID = "PROVISIONING-ID"
-	testIPIdentifier   = "IP-ID"
-	testPrefixID       = "0987654"
+	testMachineDeploymentName = "TestMachineDeployment"
+	testMachineSetName        = "TestMachineSet"
+	testMachineName           = "TestMachine"
+	testTaskID                = "TASK-ID"
+	testInstanceID            = "INSTANCE-ID"
+	testProvisioningID        = "PROVISIONING-ID"
+	testIPIdentifier          = "IP-ID"
+	testPrefixID              = "0987654"
 
 	testPublicIPv4  = "8.8.8.8"
 	testPublicIPv6  = "2001:db8::2"

@@ -25,10 +25,12 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/anexia/go-anxsdk"
 	anxsdkcommon "github.com/anexia/go-anxsdk/v1/common"
-	"github.com/anexia/go-anxsdk/v1/ipam"
 	"github.com/anexia/go-anxsdk/v1/vsphere"
 	"go.uber.org/zap"
+	controllerutil "k8c.io/machine-controller/pkg/controller/util"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"k8c.io/machine-controller/pkg/cloudprovider/common/ssh"
 	cloudprovidererrors "k8c.io/machine-controller/pkg/cloudprovider/errors"
@@ -93,14 +95,14 @@ func (p *provider) Create(ctx context.Context, log *zap.SugaredLogger, machine *
 	}()
 
 	// provision machine
-	err = provisionVM(ctx, reconcileCtx, log, sdkClient.V1().VSphere().Provisioning(), sdkClient.V1().Ipam().Addresses())
+	err = provisionVM(ctx, reconcileCtx, log, sdkClient)
 	if err != nil {
 		return nil, wrapAnexiaError(err, "failed waiting for vm provisioning")
 	}
 	return p.Get(ctx, log, machine, data)
 }
 
-func provisionVM(ctx context.Context, reconcileContext reconcileContext, log *zap.SugaredLogger, provisioningClient *vsphere.ProvisioningClient, addressClient *ipam.AddressClient) error {
+func provisionVM(ctx context.Context, reconcileContext reconcileContext, log *zap.SugaredLogger, sdkClient *anxsdk.Client) error {
 	ctx, cancel := context.WithTimeout(ctx, anxtypes.CreateRequestTimeout)
 	defer cancel()
 
@@ -109,7 +111,7 @@ func provisionVM(ctx context.Context, reconcileContext reconcileContext, log *za
 		log.Info("Machine does not contain a provisioningID. Starting to provision")
 
 		config := reconcileContext.Config
-		networkInterfaces, err := networkInterfacesForProvisioning(ctx, reconcileContext, log, addressClient)
+		networkInterfaces, err := networkInterfacesForProvisioning(ctx, reconcileContext, log, sdkClient.V1().Ipam().Addresses())
 		if err != nil {
 			return fmt.Errorf("error generating network config for machine: %w", err)
 		}
@@ -169,7 +171,7 @@ func provisionVM(ctx context.Context, reconcileContext reconcileContext, log *za
 			request.SSH = new(sshKey.PublicKey)
 		}
 
-		provisionResponse, provisionErr := provisioningClient.ProvisionTemplate(ctx, config.LocationID, config.TemplateID, request)
+		provisionResponse, provisionErr := sdkClient.V1().VSphere().Provisioning().ProvisionTemplate(ctx, config.LocationID, config.TemplateID, request)
 		if provisionErr != nil {
 			meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 				Type:    ProvisionedType,
@@ -349,19 +351,25 @@ func (p *provider) Get(ctx context.Context, log *zap.SugaredLogger, machine *clu
 	// possible out-of-band delete of the worker node in the anexia engine
 	// CCM deletes the node but here the InstanceID stays
 	if status.InstanceID == "" || status.ProvisioningID != "" {
-		p, err := sdkClient.V1().VSphere().Provisioning().GetProvisioningProgress(ctx, status.ProvisioningID)
+		provisioning, err := sdkClient.V1().VSphere().Provisioning().GetProvisioningProgress(ctx, status.ProvisioningID)
 		if err != nil {
 			return nil, wrapAnexiaError(err, "failed to get provisioning progress")
 		}
 
-		switch p.Status {
+		switch provisioning.Status {
 		// First, check whether the request is successful. We have to do this ahead of the error checking,
 		// because the errors field does not seem to get cleared if the same provisioning task was successful
 		// in the next run.
 		//
 		// See also: VSD-1473
 		case vsphere.ProvisioningStatusSuccess:
-			status.InstanceID = p.VMIdentifier
+			// first tag the machine, then assign
+			tagErr := p.tagMachineInEngine(ctx, sdkClient, provisioning, machine, pd.Client)
+			if tagErr != nil {
+				return nil, tagErr
+			}
+
+			status.InstanceID = provisioning.VMIdentifier
 
 			// clear ProvisioningID after successfully provisioned
 			// if an out-of-band delete happens the ProvisioningID has to be empty in order to create a new machine inside Create() instead of waiting endlessly
@@ -376,13 +384,13 @@ func (p *provider) Get(ctx context.Context, log *zap.SugaredLogger, machine *clu
 				return nil, fmt.Errorf("failed updating machine status: %w", err)
 			}
 		case vsphere.ProvisioningStatusFailed:
-			return nil, fmt.Errorf("vm provisioning had errors: %s", strings.Join(p.Errors, ","))
+			return nil, fmt.Errorf("vm provisioning had errors: %s", strings.Join(provisioning.Errors, ","))
 		case vsphere.ProvisioningStatusCancelled:
-			return nil, fmt.Errorf("vm provisioning was cancelled: %s", strings.Join(p.Errors, ","))
+			return nil, fmt.Errorf("vm provisioning was cancelled: %s", strings.Join(provisioning.Errors, ","))
 		case vsphere.ProvisioningStatusInProgress:
 			return &anexiaInstance{isCreating: true}, nil
 		default:
-			return nil, fmt.Errorf("unexpected provisioning status %q for task %q", p.Status, status.ProvisioningID)
+			return nil, fmt.Errorf("unexpected provisioning status %q for task %q", provisioning.Status, status.ProvisioningID)
 		}
 	}
 
@@ -399,6 +407,51 @@ func (p *provider) Get(ctx context.Context, log *zap.SugaredLogger, machine *clu
 	instance.info = info
 
 	return &instance, nil
+}
+
+func (p *provider) tagMachineInEngine(ctx context.Context, sdkClient *anxsdk.Client, provisioning vsphere.ProvisioningProgress, machine *clusterv1alpha1.Machine, kubeClient client.Client) error {
+	const (
+		akeNodepoolLabelKey           = "ake-nodepool"
+		nodepoolEngineIDAnnotationKey = "k8s.anx.io/nodepool-engine-id"
+	)
+
+	err := sdkClient.V1().Core().Resources().AssignTag(ctx, provisioning.VMIdentifier, "k8s")
+	if err != nil && !anxsdkcommon.IsErrorWithStatusCode(err, http.StatusUnprocessableEntity) {
+		return fmt.Errorf("failed to tag VM in engine: %w", err)
+	}
+	err = sdkClient.V1().Core().Resources().AssignTag(ctx, provisioning.VMIdentifier, "k8s-worker")
+	if err != nil && !anxsdkcommon.IsErrorWithStatusCode(err, http.StatusUnprocessableEntity) {
+		return fmt.Errorf("failed to tag VM in engine: %w", err)
+	}
+
+	// resolve machine deployment
+	refMDName, _, err := controllerutil.GetMachineDeploymentNameAndRevisionForMachine(ctx, machine, kubeClient)
+	if err != nil {
+		return fmt.Errorf("failed to get referenced machine deployment name: %w", err)
+	}
+
+	// prefer the annotation on the MachineDeployment
+	var md clusterv1alpha1.MachineDeployment
+	err = kubeClient.Get(ctx, client.ObjectKey{Name: refMDName, Namespace: machine.Namespace}, &md)
+	if err != nil {
+		return fmt.Errorf("failed to load referenced machine deployment: %w", err)
+	}
+
+	npID, found := md.Annotations[nodepoolEngineIDAnnotationKey]
+	if !found {
+		// fallback to the deprecated way
+		npID, found = machine.Labels[akeNodepoolLabelKey]
+	}
+
+	if found {
+		// tag the vm with the found
+		err = sdkClient.V1().Core().Resources().AssignTag(ctx, provisioning.VMIdentifier, "k8s-nodepool:"+npID)
+		if err != nil && !anxsdkcommon.IsErrorWithStatusCode(err, http.StatusUnprocessableEntity) {
+			return fmt.Errorf("failed to tag VM in engine: %w", err)
+		}
+	}
+
+	return nil
 }
 
 func (p *provider) Cleanup(ctx context.Context, log *zap.SugaredLogger, machine *clusterv1alpha1.Machine, data *cloudprovidertypes.ProviderData) (isDeleted bool, retErr error) {
