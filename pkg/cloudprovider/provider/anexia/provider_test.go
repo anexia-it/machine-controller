@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -34,10 +33,6 @@ import (
 	"github.com/anexia/go-anxsdk/v1/ipam"
 	"github.com/anexia/go-anxsdk/v1/vsphere"
 	"github.com/gophercloud/gophercloud/testhelper"
-	"go.anx.io/go-anxcloud/pkg/api"
-	anxcorev1 "go.anx.io/go-anxcloud/pkg/apis/core/v1"
-	anxclient "go.anx.io/go-anxcloud/pkg/client"
-	"go.anx.io/go-anxcloud/pkg/core"
 	"go.uber.org/zap"
 
 	cloudprovidererrors "k8c.io/machine-controller/pkg/cloudprovider/errors"
@@ -60,7 +55,7 @@ const (
 
 func TestAnexiaProvider(t *testing.T) {
 	testhelper.SetupHTTP()
-	_, server := anxclient.NewTestClient(nil, testhelper.Mux)
+	server := httptest.NewServer(testhelper.Mux)
 	sdkClient := anxsdk.NewClient(anxsdk.WithBaseURL(server.URL), anxsdk.WithHTTPClient(server.Client()))
 	provisioningClient := sdkClient.V1().VSphere().Provisioning()
 	addressClient := sdkClient.V1().Ipam().Addresses()
@@ -668,103 +663,6 @@ func TestUpdateStatus(t *testing.T) {
 }
 
 func Test_wrapAnexiaError(t *testing.T) {
-	forbiddenMockHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusForbidden)
-		_, err := w.Write([]byte(`{"error": {"code": 403}}`))
-		testhelper.AssertNoErr(t, err)
-	})
-
-	unauthorizedMockHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusUnauthorized)
-		_, err := w.Write([]byte(`{"error": {"code": 401}}`))
-		testhelper.AssertNoErr(t, err)
-	})
-
-	legacyClientRun := func(url string) error {
-		client, err := anxclient.New(anxclient.BaseURL(url), anxclient.IgnoreMissingToken(), anxclient.ParseEngineErrors(true))
-		testhelper.AssertNoErr(t, err)
-		_, err = core.NewAPI(client).Location().List(context.Background(), 1, 1, "", "")
-		return err
-	}
-
-	apiClientRun := func(url string) error {
-		api, err := api.NewAPI(api.WithClientOptions(
-			anxclient.BaseURL(url),
-			anxclient.IgnoreMissingToken(),
-		))
-		testhelper.AssertNoErr(t, err)
-		return api.Get(context.Background(), &anxcorev1.Location{Identifier: "foo"})
-	}
-
-	testCases := []struct {
-		name        string
-		mockHandler http.HandlerFunc
-		run         func(url string) error
-	}{
-		{
-			name:        "api client returns forbidden",
-			mockHandler: forbiddenMockHandler,
-			run:         apiClientRun,
-		},
-		{
-			name:        "api client returns unauthorized",
-			mockHandler: unauthorizedMockHandler,
-			run:         apiClientRun,
-		},
-		{
-			name:        "legacy client returns forbidden",
-			mockHandler: forbiddenMockHandler,
-			run:         legacyClientRun,
-		},
-		{
-			name:        "legacy client returns unauthorized",
-			mockHandler: unauthorizedMockHandler,
-			run:         legacyClientRun,
-		},
-	}
-
-	for _, testCase := range testCases {
-		t.Run(testCase.name, func(t *testing.T) {
-			srv := httptest.NewServer(testCase.mockHandler)
-			defer srv.Close()
-
-			err := wrapAnexiaError(testCase.run(srv.URL), "foo")
-			if ok, _, _ := cloudprovidererrors.IsTerminalError(err); !ok {
-				t.Errorf("unexpected error %#v, expected TerminalError", err)
-			}
-		})
-	}
-
-	t.Run("api client 404 HTTPError shouldn't convert to TerminalError", func(t *testing.T) {
-		err := api.NewHTTPError(http.StatusNotFound, "GET", &url.URL{}, errors.New("foo"))
-		err = wrapAnexiaError(err, "foo")
-		if ok, _, _ := cloudprovidererrors.IsTerminalError(err); ok {
-			t.Errorf("unexpected error %#v, expected no TerminalError", err)
-		}
-	})
-
-	t.Run("legacy api client unspecific ResponseError shouldn't convert to TerminalError", func(t *testing.T) {
-		var err error = &anxclient.ResponseError{}
-		err = wrapAnexiaError(err, "foo")
-		if ok, _, _ := cloudprovidererrors.IsTerminalError(err); ok {
-			t.Errorf("unexpected error %#v, expected no TerminalError", err)
-		}
-	})
-
-	t.Run("legacy api client 404 ResponseError should convert to NotFoundError", func(t *testing.T) {
-		var err error = &anxclient.ResponseError{
-			ErrorData: struct {
-				Code       int               `json:"code"`
-				Message    string            `json:"message"`
-				Validation map[string]string `json:"validation"`
-			}{Code: http.StatusNotFound, Message: "test msg", Validation: nil},
-		}
-		err = wrapAnexiaError(err, "foo")
-		if ok := cloudprovidererrors.IsNotFound(err); !ok {
-			t.Errorf("unexpected error %#v, expected ErrInstanceNotFound", err)
-		}
-	})
-
 	t.Run("go-anxsdk 403 APIError should convert to TerminalError", func(t *testing.T) {
 		var err error = &anxsdkcommon.APIError{StatusCode: http.StatusForbidden}
 		err = wrapAnexiaError(err, "foo")

@@ -28,8 +28,6 @@ import (
 	anxsdkcommon "github.com/anexia/go-anxsdk/v1/common"
 	"github.com/anexia/go-anxsdk/v1/ipam"
 	"github.com/anexia/go-anxsdk/v1/vsphere"
-	"go.anx.io/go-anxcloud/pkg/api"
-	anxclient "go.anx.io/go-anxcloud/pkg/client"
 	"go.uber.org/zap"
 
 	"k8c.io/machine-controller/pkg/cloudprovider/common/ssh"
@@ -53,9 +51,9 @@ const (
 
 	invalidCredentialsMessage = "Request was rejected due to invalid credentials"
 
-	// defaultCPUPerformanceType matches go-anxcloud's NewDefinition default, used
+	// defaultCPUPerformanceType matches go-anxsdk NewDefinition default, used
 	// when no cpuPerformanceType is configured.
-	defaultCPUPerformanceType = "performance"
+	defaultCPUPerformanceType = vsphere.CPUPerformanceTypePerformance
 )
 
 type provider struct {
@@ -118,13 +116,13 @@ func provisionVM(ctx context.Context, reconcileContext reconcileContext, log *za
 			MemoryMB:           new(config.Memory),
 			CPUs:               new(config.CPUs),
 			DiskGB:             new(config.DiskSize),
-			DiskType:           new(config.DiskPerformanceType),
+			DiskType:           new(vsphere.DiskType(config.DiskPerformanceType)),
 			CPUPerformanceType: new(defaultCPUPerformanceType),
 			Network:            networkInterfaces,
 		}
 
 		if config.CPUPerformanceType != "" {
-			request.CPUPerformanceType = new(config.CPUPerformanceType)
+			request.CPUPerformanceType = new(vsphere.CPUPerformanceType(config.CPUPerformanceType))
 		}
 
 		if config.AvailabilityZone != "" {
@@ -180,6 +178,10 @@ func provisionVM(ctx context.Context, reconcileContext reconcileContext, log *za
 				Reason:  "ProvisioningError",
 				Message: fmt.Sprintf("instance provisioning failed: %v", err.Error()),
 			})
+			err = updateMachineStatus(reconcileContext.Machine, *status, reconcileContext.ProviderData.Update)
+			if err != nil {
+				return err
+			}
 			return newError(common.CreateMachineError, "instance provisioning failed: %v", err)
 		}
 
@@ -490,28 +492,6 @@ func updateMachineStatus(machine *clusterv1alpha1.Machine, status anxtypes.Provi
 }
 
 func wrapAnexiaError(err error, msg string) error {
-	var httpError api.HTTPError
-	if errors.As(err, &httpError) && (httpError.StatusCode() == http.StatusForbidden || httpError.StatusCode() == http.StatusUnauthorized) {
-		return cloudprovidererrors.TerminalError{
-			Reason:  common.InvalidConfigurationMachineError,
-			Message: invalidCredentialsMessage,
-		}
-	}
-
-	var responseError *anxclient.ResponseError
-	if errors.As(err, &responseError) {
-		if responseError.ErrorData.Code == http.StatusForbidden || responseError.ErrorData.Code == http.StatusUnauthorized {
-			return cloudprovidererrors.TerminalError{
-				Reason:  common.InvalidConfigurationMachineError,
-				Message: invalidCredentialsMessage,
-			}
-		}
-
-		if responseError.ErrorData.Code == http.StatusNotFound {
-			return cloudprovidererrors.ErrInstanceNotFound
-		}
-	}
-
 	var sdkError *anxsdkcommon.APIError
 	if errors.As(err, &sdkError) {
 		if sdkError.StatusCode == http.StatusForbidden || sdkError.StatusCode == http.StatusUnauthorized {
