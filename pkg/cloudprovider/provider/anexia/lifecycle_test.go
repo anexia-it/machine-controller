@@ -28,6 +28,8 @@ import (
 	"github.com/anexia/go-anxsdk/v1/vsphere"
 	"github.com/gophercloud/gophercloud/testhelper"
 	"go.uber.org/zap"
+	"k8s.io/client-go/kubernetes/scheme"
+	fakectrlruntimeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	cloudprovidertypes "k8c.io/machine-controller/pkg/cloudprovider/types"
 	clusterv1alpha1 "k8c.io/machine-controller/sdk/apis/cluster/v1alpha1"
@@ -51,9 +53,53 @@ func newTestProvider(t *testing.T, mux *http.ServeMux) (*provider, *clusterv1alp
 	}
 	t.Cleanup(func() { getSDKClient = original })
 
-	machine := &clusterv1alpha1.Machine{ObjectMeta: metav1.ObjectMeta{Name: testMachineName}}
+	if err := clusterv1alpha1.SchemeBuilder.AddToScheme(scheme.Scheme); err != nil {
+		t.Fatalf("failed to add clusterv1alpha1 to scheme: %v", err)
+	}
+
+	machinedeployment := &clusterv1alpha1.MachineDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: testMachineDeploymentName,
+			Labels: map[string]string{
+				"ake-nodepool": "NODEPOOL-ID-OLD-POSITION",
+			},
+			Annotations: map[string]string{
+				"k8s.anx.io/nodepool-engine-id": "NODEPOOL-ID-NEW-POSITION",
+			},
+		},
+	}
+	machineset := &clusterv1alpha1.MachineSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: testMachineSetName,
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					Kind: "MachineDeployment",
+					Name: testMachineDeploymentName,
+				},
+			},
+		},
+	}
+	machine := &clusterv1alpha1.Machine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: testMachineName,
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					Kind: "MachineSet",
+					Name: testMachineSetName,
+				},
+			},
+		},
+	}
+
+	var fakeClient = fakectrlruntimeclient.
+		NewClientBuilder().
+		WithScheme(scheme.Scheme).
+		WithObjects(machinedeployment, machineset, machine).
+		Build()
+
 	data := &cloudprovidertypes.ProviderData{
 		Update: func(*clusterv1alpha1.Machine, ...cloudprovidertypes.MachineModifier) error { return nil },
+		Client: fakeClient,
 	}
 
 	return &provider{}, machine, data
@@ -303,6 +349,9 @@ func TestGetMarksProvisionedOnSuccess(t *testing.T) {
 			t.Errorf("encoding info: %v", err)
 		}
 	})
+	mux.HandleFunc("POST /api/core/v1/resource.json/INSTANCE-ID/tags/k8s", func(w http.ResponseWriter, r *http.Request) {})
+	mux.HandleFunc("POST /api/core/v1/resource.json/INSTANCE-ID/tags/k8s-worker", func(w http.ResponseWriter, r *http.Request) {})
+	mux.HandleFunc("POST /api/core/v1/resource.json/INSTANCE-ID/tags/k8s-nodepool:NODEPOOL-ID-NEW-POSITION", func(w http.ResponseWriter, r *http.Request) {})
 
 	p, machine, data := newTestProvider(t, mux)
 	setProviderStatus(t, machine, anxtypes.ProviderStatus{ProvisioningID: testProvisioningID})

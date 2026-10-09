@@ -425,14 +425,14 @@ func (p *provider) tagMachineInEngine(ctx context.Context, sdkClient *anxsdk.Cli
 	}
 
 	// resolve machine deployment
-	referencedMachineDeployment, _, err := controllerutil.GetMachineDeploymentNameAndRevisionForMachine(ctx, machine, kubeClient)
+	refMDName, _, err := controllerutil.GetMachineDeploymentNameAndRevisionForMachine(ctx, machine, kubeClient)
 	if err != nil {
 		return fmt.Errorf("failed to get referenced machine deployment name: %w", err)
 	}
 
 	// prefer the annotation on the MachineDeployment
 	var md clusterv1alpha1.MachineDeployment
-	err = kubeClient.Get(ctx, client.ObjectKey{Name: referencedMachineDeployment, Namespace: machine.Namespace}, &md)
+	err = kubeClient.Get(ctx, client.ObjectKey{Name: refMDName, Namespace: machine.Namespace}, &md)
 	if err != nil {
 		return fmt.Errorf("failed to load referenced machine deployment: %w", err)
 	}
