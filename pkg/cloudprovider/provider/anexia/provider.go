@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"time"
 
 	anxsdkcommon "github.com/anexia/go-anxsdk/v1/common"
 	"github.com/anexia/go-anxsdk/v1/ipam"
@@ -37,7 +36,6 @@ import (
 	cloudprovidererrors "k8c.io/machine-controller/pkg/cloudprovider/errors"
 	"k8c.io/machine-controller/pkg/cloudprovider/instance"
 	cloudprovidertypes "k8c.io/machine-controller/pkg/cloudprovider/types"
-	cloudproviderutil "k8c.io/machine-controller/pkg/cloudprovider/util"
 	"k8c.io/machine-controller/sdk/apis/cluster/common"
 	clusterv1alpha1 "k8c.io/machine-controller/sdk/apis/cluster/v1alpha1"
 	anxtypes "k8c.io/machine-controller/sdk/cloudprovider/anexia"
@@ -449,36 +447,6 @@ func (p *provider) MachineMetricsLabels(_ *clusterv1alpha1.Machine) (map[string]
 
 func (p *provider) SetMetricsForMachines(_ clusterv1alpha1.MachineList) error {
 	return nil
-}
-
-func getClient(machineName *string) (api.API, anxclient.Client, error) {
-	logPrefix := "[Anexia API]"
-
-	if machineName != nil {
-		logPrefix = fmt.Sprintf("[Anexia API for Machine %q]", *machineName)
-	}
-
-	httpClient := cloudproviderutil.HTTPClientConfig{
-		Timeout:   120 * time.Second,
-		LogPrefix: logPrefix,
-	}.New()
-
-	legacyClientOptions := []anxclient.Option{
-		anxclient.TokenFromEnv(false),
-		anxclient.HTTPClient(&httpClient),
-	}
-
-	a, err := api.NewAPI(api.WithClientOptions(legacyClientOptions...))
-	if err != nil {
-		return nil, nil, fmt.Errorf("error creating generic API client: %w", err)
-	}
-
-	legacyClient, err := anxclient.New(legacyClientOptions...)
-	if err != nil {
-		return nil, nil, fmt.Errorf("error creating legacy client: %w", err)
-	}
-
-	return a, legacyClient, nil
 }
 
 func getProviderStatus(log *zap.SugaredLogger, machine *clusterv1alpha1.Machine) anxtypes.ProviderStatus {
