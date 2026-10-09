@@ -28,7 +28,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/anexia/go-anxsdk"
 	anxsdkcommon "github.com/anexia/go-anxsdk/v1/common"
+	"github.com/anexia/go-anxsdk/v1/vsphere"
 	"github.com/gophercloud/gophercloud/testhelper"
 	"go.anx.io/go-anxcloud/pkg/api"
 	"go.anx.io/go-anxcloud/pkg/api/mock"
@@ -37,8 +39,6 @@ import (
 	anxclient "go.anx.io/go-anxcloud/pkg/client"
 	"go.anx.io/go-anxcloud/pkg/core"
 	"go.anx.io/go-anxcloud/pkg/ipam/address"
-	"go.anx.io/go-anxcloud/pkg/vsphere/provisioning/progress"
-	"go.anx.io/go-anxcloud/pkg/vsphere/provisioning/vm"
 	"go.uber.org/zap"
 
 	cloudprovidererrors "k8c.io/machine-controller/pkg/cloudprovider/errors"
@@ -62,6 +62,8 @@ const (
 func TestAnexiaProvider(t *testing.T) {
 	testhelper.SetupHTTP()
 	client, server := anxclient.NewTestClient(nil, testhelper.Mux)
+	sdkClient := anxsdk.NewClient(anxsdk.WithBaseURL(server.URL), anxsdk.WithHTTPClient(server.Client()))
+	provisioningClient := sdkClient.V1().VSphere().Provisioning()
 	log := zap.NewNop().Sugar()
 
 	a := mock.NewMockAPI()
@@ -195,11 +197,11 @@ func TestAnexiaProvider(t *testing.T) {
 
 				testCase.AssertJSONBody(jsonBody)
 
-				err := json.NewEncoder(writer).Encode(vm.ProvisioningResponse{
-					Progress:   100,
-					Errors:     nil,
-					Identifier: templateID,
-					Queued:     false,
+				err := json.NewEncoder(writer).Encode(vsphere.ProvisioningResponse{
+					Progress:       100,
+					Errors:         nil,
+					TaskIdentifier: templateID,
+					Queued:         false,
 				})
 				testhelper.AssertNoErr(t, err)
 			})
@@ -207,17 +209,18 @@ func TestAnexiaProvider(t *testing.T) {
 			testhelper.Mux.HandleFunc(fmt.Sprintf("/api/vsphere/v1/provisioning/progress.json/%s", templateID), func(writer http.ResponseWriter, request *http.Request) {
 				testhelper.TestMethod(t, request, http.MethodGet)
 
-				err := json.NewEncoder(writer).Encode(progress.Progress{
+				err := json.NewEncoder(writer).Encode(vsphere.ProvisioningProgress{
 					TaskIdentifier: templateID,
 					Queued:         false,
 					Progress:       100,
 					VMIdentifier:   "VM-IDENTIFIER",
 					Errors:         nil,
+					Status:         vsphere.ProvisioningStatusSuccess,
 				})
 				testhelper.AssertNoErr(t, err)
 			})
 
-			err := provisionVM(context.Background(), testCase.ReconcileContext, log, client)
+			err := provisionVM(context.Background(), testCase.ReconcileContext, log, client, provisioningClient)
 			testhelper.AssertNoErr(t, err)
 		}
 	})
