@@ -30,8 +30,6 @@ import (
 	"github.com/anexia/go-anxsdk/v1/vsphere"
 	"go.anx.io/go-anxcloud/pkg/api"
 	anxclient "go.anx.io/go-anxcloud/pkg/client"
-	legacyvsphere "go.anx.io/go-anxcloud/pkg/vsphere"
-	legacyprogress "go.anx.io/go-anxcloud/pkg/vsphere/provisioning/progress"
 	"go.uber.org/zap"
 
 	"k8c.io/machine-controller/pkg/cloudprovider/common/ssh"
@@ -406,46 +404,37 @@ func (p *provider) Cleanup(ctx context.Context, log *zap.SugaredLogger, machine 
 
 	ensureConditions(&status)
 
-	_, cli, err := getClient(&machine.Name)
-	if err != nil {
-		return false, newError(common.InvalidConfigurationMachineError, "failed to create Anexia client: %v", err)
-	}
-
-	vsphereAPI := legacyvsphere.NewAPI(cli)
+	provisioningClient := getSDKClient(&machine.Name).V1().VSphere().Provisioning()
 
 	deleteCtx, cancel := context.WithTimeout(ctx, anxtypes.DeleteRequestTimeout)
 	defer cancel()
 
 	// first check whether there is an provisioning ongoing
 	if status.DeprovisioningID == "" {
-		response, err := vsphereAPI.Provisioning().VM().Deprovision(deleteCtx, status.InstanceID, false)
-		if err != nil {
-			var respErr *anxclient.ResponseError
-
-			// Only error if the error was not "not found"
-			if !errors.As(err, &respErr) || respErr.ErrorData.Code != http.StatusNotFound {
-				return false, newError(common.DeleteMachineError, "failed to delete machine: %v", err)
-			}
+		response, err := provisioningClient.Deprovision(deleteCtx, status.InstanceID, false)
+		// Only error if the error was not "not found"
+		if err != nil && !anxsdkcommon.IsNotFoundError(err) {
+			return false, newError(common.DeleteMachineError, "failed to delete machine: %v", err)
 		}
 		status.DeprovisioningID = response.Identifier
 	}
 
-	return isTaskDone(deleteCtx, cli, status.DeprovisioningID)
+	return isTaskDone(deleteCtx, provisioningClient, status.DeprovisioningID)
 }
 
-func isTaskDone(ctx context.Context, cli anxclient.Client, progressIdentifier string) (bool, error) {
-	response, err := legacyprogress.NewAPI(cli).Get(ctx, progressIdentifier)
+func isTaskDone(ctx context.Context, provisioningClient *vsphere.ProvisioningClient, progressIdentifier string) (bool, error) {
+	response, err := provisioningClient.GetProvisioningProgress(ctx, progressIdentifier)
 	if err != nil {
 		return false, err
 	}
 
 	switch response.Status {
-	case legacyprogress.StatusSuccess:
+	case vsphere.ProvisioningStatusSuccess:
 		return true, nil
-	case legacyprogress.StatusInProgress:
+	case vsphere.ProvisioningStatusInProgress:
 		return false, nil
-	case legacyprogress.StatusCancelled,
-		legacyprogress.StatusFailed:
+	case vsphere.ProvisioningStatusCancelled,
+		vsphere.ProvisioningStatusFailed:
 		taskErrors, _ := json.Marshal(response.Errors)
 		return true, fmt.Errorf("task failed with: %s", taskErrors)
 	default:
