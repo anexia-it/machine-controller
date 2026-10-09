@@ -62,6 +62,8 @@ func TestAnexiaProvider(t *testing.T) {
 	log := zap.NewNop().Sugar()
 
 	testhelper.Mux.HandleFunc("/api/vsphere/v1/provisioning/templates.json/foo/templates", func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+
 		err := json.NewEncoder(writer).Encode([]vsphere.TemplateResponse{
 			{ID: "TEMPLATE-ID-OLD-BUILD", Name: testTemplateName, Build: "b01"},
 			{ID: "TEMPLATE-ID", Name: testTemplateName, Build: "b02"},
@@ -84,12 +86,12 @@ func TestAnexiaProvider(t *testing.T) {
 			{
 				// Provision a generic VM with some custom dns entries
 				ReconcileContext: hookableReconcileContext("LOCATION-ID", "TEMPLATE-ID", func(rc *reconcileContext) {
+					rc.UserData = "#!/usr/bin/bash\n echo asdf"
 					rc.ProviderConfig = &providerconfigtypes.Config{
 						Network: &providerconfigtypes.NetworkConfig{
 							DNS: providerconfigtypes.DNSConfig{
 								Servers: []string{
 									"1.1.1.1",
-									"",
 									"192.168.0.1",
 									"192.168.0.2",
 									"192.168.0.3",
@@ -99,21 +101,23 @@ func TestAnexiaProvider(t *testing.T) {
 					}
 				}),
 				AssertJSONBody: func(jsonBody jsonObject) {
-					testhelper.AssertEquals(t, jsonBody["cpu_performance_type"], "performance")
-					testhelper.AssertEquals(t, jsonBody["hostname"], "TestMachine")
+					testhelper.AssertEquals(t, jsonBody["cpu_performance_type"], "enterprise")
+					testhelper.AssertEquals(t, jsonBody["disk_type"], "ENT4")
+					testhelper.AssertEquals(t, jsonBody["hostname"], testMachineName)
 					testhelper.AssertEquals(t, jsonBody["memory_mb"], json.Number("5"))
 
 					testhelper.AssertEquals(t, jsonBody["dns1"], "1.1.1.1")
-					_, exists := jsonBody["dns2"]
-					testhelper.AssertEquals(t, exists, false)
-					testhelper.AssertEquals(t, jsonBody["dns3"], "192.168.0.1")
-					testhelper.AssertEquals(t, jsonBody["dns4"], "192.168.0.2")
+					testhelper.AssertEquals(t, jsonBody["dns2"], "192.168.0.1")
+					testhelper.AssertEquals(t, jsonBody["dns3"], "192.168.0.2")
+					testhelper.AssertEquals(t, jsonBody["dns4"], "192.168.0.3")
 
-					networkArray := jsonBody["network"].([]interface{})
+					networkArray := jsonBody["network"].([]any)
 					networkObject := networkArray[0].(jsonObject)
 					testhelper.AssertEquals(t, networkObject["vlan"], "VLAN-ID")
 					testhelper.AssertEquals(t, networkObject["nic_type"], "virtio")
-					testhelper.AssertEquals(t, networkObject["ips"].([]interface{})[0], "8.8.8.8")
+					testhelper.AssertEquals(t, networkObject["ips"].([]any)[0], testPublicIPv4)
+					testhelper.AssertEquals(t, jsonBody["script"], "IyEvdXNyL2Jpbi9iYXNoCiBlY2hvIGFzZGY=") // user-data script as base64
+					testhelper.AssertEquals(t, jsonBody["ssh"], "ssh-ed25519 AAAAC3Nza test1\nssh-rsa AAAAB3NzaC1yc test2")
 				},
 			},
 			{
@@ -171,12 +175,13 @@ func TestAnexiaProvider(t *testing.T) {
 			},
 		}
 
-		testhelper.Mux.HandleFunc("/api/ipam/v1/address/ip/count.json", func(writer http.ResponseWriter, _ *http.Request) {
+		testhelper.Mux.HandleFunc("/api/ipam/v1/address/reserve/ip/count.json", func(writer http.ResponseWriter, _ *http.Request) {
+			writer.Header().Set("Content-Type", "application/json")
 			err := json.NewEncoder(writer).Encode(paging.PagedResponse[ipam.AddressReserveResponseItem]{
 				Data: []ipam.AddressReserveResponseItem{
 					{
-						Identifier: "IP-ID",
-						Text:       "8.8.8.8",
+						Identifier: testIPIdentifier,
+						Text:       testPublicIPv4,
 					},
 				},
 			})
@@ -196,6 +201,7 @@ func TestAnexiaProvider(t *testing.T) {
 
 				testCase.AssertJSONBody(jsonBody)
 
+				writer.Header().Set("Content-Type", "application/json")
 				err := json.NewEncoder(writer).Encode(vsphere.ProvisioningResponse{
 					Progress:       100,
 					Errors:         nil,
@@ -208,6 +214,7 @@ func TestAnexiaProvider(t *testing.T) {
 			testhelper.Mux.HandleFunc(fmt.Sprintf("/api/vsphere/v1/provisioning/progress.json/%s", templateID), func(writer http.ResponseWriter, request *http.Request) {
 				testhelper.TestMethod(t, request, http.MethodGet)
 
+				writer.Header().Set("Content-Type", "application/json")
 				err := json.NewEncoder(writer).Encode(vsphere.ProvisioningProgress{
 					TaskIdentifier: templateID,
 					Queued:         false,
@@ -240,7 +247,7 @@ func TestAnexiaProvider(t *testing.T) {
 					c.Networks = []anxtypes.RawNetwork{
 						{
 							VlanID:         providerconfigtypes.ConfigVarString{Value: "17825213"},
-							PrefixIDs:      []providerconfigtypes.ConfigVarString{{Value: "0987654"}},
+							PrefixIDs:      []providerconfigtypes.ConfigVarString{{Value: testPrefixID}},
 							BandwidthLimit: 19,
 						},
 					}
@@ -254,7 +261,7 @@ func TestAnexiaProvider(t *testing.T) {
 					c.Networks = []anxtypes.RawNetwork{
 						{
 							VlanID:    providerconfigtypes.ConfigVarString{Value: "17825213"},
-							PrefixIDs: []providerconfigtypes.ConfigVarString{{Value: "0987654"}},
+							PrefixIDs: []providerconfigtypes.ConfigVarString{{Value: testPrefixID}},
 						},
 					}
 				}),
@@ -262,7 +269,7 @@ func TestAnexiaProvider(t *testing.T) {
 				expectedNetwork: []resolvedNetwork{
 					{
 						VlanID:         "17825213",
-						Prefixes:       []string{"0987654"},
+						Prefixes:       []string{testPrefixID},
 						BandwidthLimit: 0,
 					},
 				},
@@ -273,7 +280,7 @@ func TestAnexiaProvider(t *testing.T) {
 					c.Networks = []anxtypes.RawNetwork{
 						{
 							VlanID:         providerconfigtypes.ConfigVarString{Value: "17825213"},
-							PrefixIDs:      []providerconfigtypes.ConfigVarString{{Value: "0987654"}},
+							PrefixIDs:      []providerconfigtypes.ConfigVarString{{Value: testPrefixID}},
 							BandwidthLimit: 10000,
 						},
 					}
@@ -282,7 +289,7 @@ func TestAnexiaProvider(t *testing.T) {
 				expectedNetwork: []resolvedNetwork{
 					{
 						VlanID:         "17825213",
-						Prefixes:       []string{"0987654"},
+						Prefixes:       []string{testPrefixID},
 						BandwidthLimit: 10000,
 					},
 				},
@@ -326,7 +333,7 @@ func TestAnexiaProvider(t *testing.T) {
 					c.Networks = []anxtypes.RawNetwork{
 						{
 							VlanID:         providerconfigtypes.ConfigVarString{Value: "17825213"},
-							PrefixIDs:      []providerconfigtypes.ConfigVarString{{Value: "0987654"}},
+							PrefixIDs:      []providerconfigtypes.ConfigVarString{{Value: testPrefixID}},
 							BandwidthLimit: 19,
 						},
 					}
@@ -340,7 +347,7 @@ func TestAnexiaProvider(t *testing.T) {
 					c.Networks = []anxtypes.RawNetwork{
 						{
 							VlanID:    providerconfigtypes.ConfigVarString{Value: "17825213"},
-							PrefixIDs: []providerconfigtypes.ConfigVarString{{Value: "0987654"}},
+							PrefixIDs: []providerconfigtypes.ConfigVarString{{Value: testPrefixID}},
 						},
 					}
 				}),
@@ -348,7 +355,7 @@ func TestAnexiaProvider(t *testing.T) {
 				expectedNetwork: []resolvedNetwork{
 					{
 						VlanID:         "17825213",
-						Prefixes:       []string{"0987654"},
+						Prefixes:       []string{testPrefixID},
 						BandwidthLimit: 0,
 					},
 				},
@@ -359,7 +366,7 @@ func TestAnexiaProvider(t *testing.T) {
 					c.Networks = []anxtypes.RawNetwork{
 						{
 							VlanID:         providerconfigtypes.ConfigVarString{Value: "17825213"},
-							PrefixIDs:      []providerconfigtypes.ConfigVarString{{Value: "0987654"}},
+							PrefixIDs:      []providerconfigtypes.ConfigVarString{{Value: testPrefixID}},
 							BandwidthLimit: 10000,
 						},
 					}
@@ -368,7 +375,7 @@ func TestAnexiaProvider(t *testing.T) {
 				expectedNetwork: []resolvedNetwork{
 					{
 						VlanID:         "17825213",
-						Prefixes:       []string{"0987654"},
+						Prefixes:       []string{testPrefixID},
 						BandwidthLimit: 10000,
 					},
 				},
@@ -501,7 +508,7 @@ func TestAnexiaProvider(t *testing.T) {
 		reconcileCtx := reconcileContext{Status: providerStatus}
 
 		t.Run("with unbound reserved IP", func(t *testing.T) {
-			expectedIP := "8.8.8.8"
+			expectedIP := testPublicIPv4
 			providerStatus.Networks[0].Addresses[0].ReservedIP = expectedIP
 			providerStatus.Networks[0].Addresses[0].IPState = anxtypes.IPStateUnbound
 			providerStatus.Networks[0].Addresses[0].IPProvisioningExpires = time.Now().Add(anxtypes.IPProvisioningExpires)
@@ -582,9 +589,9 @@ func TestValidate(t *testing.T) {
 			Name: "combined",
 			Config: hookableConfig(func(c *anxtypes.RawConfig) {
 				c.CPUs = 0
-				c.CPUPerformanceType = ""
+				c.Memory = 0
 			}),
-			Error: errors.Join(errors.New("cpu count is missing"), errors.New("cpu performance type is missing")),
+			Error: errors.Join(errors.New("cpu count is missing"), errors.New("memory size is missing")),
 		},
 		{
 			Name:   "default is valid",
@@ -634,9 +641,22 @@ func TestGetProviderStatus(t *testing.T) {
 	testhelper.AssertNoErr(t, err)
 	machine.Status.ProviderStatus = &runtime.RawExtension{Raw: providerStatusJSON}
 
-	returnedStatus := getProviderStatus(zap.NewNop().Sugar(), machine)
+	returnedStatus, err := getProviderStatus(zap.NewNop().Sugar(), machine)
+	testhelper.AssertNoErr(t, err)
 
 	testhelper.AssertEquals(t, "InstanceID", returnedStatus.InstanceID)
+}
+
+func TestGetProviderStatusCorrupt(t *testing.T) {
+	t.Parallel()
+
+	machine := &clusterv1alpha1.Machine{}
+	machine.Status.ProviderStatus = &runtime.RawExtension{Raw: []byte("{not json")}
+
+	// A corrupt status must not be silently reported as an empty status - that
+	// would make the controller provision a second VM for this Machine.
+	_, err := getProviderStatus(zap.NewNop().Sugar(), machine)
+	testhelper.AssertErr(t, err)
 }
 
 func TestUpdateStatus(t *testing.T) {
@@ -653,7 +673,8 @@ func TestUpdateStatus(t *testing.T) {
 	err = updateMachineStatus(machine, providerStatus, func(paramMachine *clusterv1alpha1.Machine, _ ...cloudprovidertypes.MachineModifier) error {
 		called = true
 		testhelper.AssertEquals(t, machine, paramMachine)
-		status := getProviderStatus(zap.NewNop().Sugar(), machine)
+		status, err := getProviderStatus(zap.NewNop().Sugar(), machine)
+		testhelper.AssertNoErr(t, err)
 		testhelper.AssertEquals(t, status.InstanceID, providerStatus.InstanceID)
 		return nil
 	})

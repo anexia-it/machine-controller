@@ -27,9 +27,13 @@ import (
 	anxtypes "k8c.io/machine-controller/sdk/cloudprovider/anexia"
 )
 
-// getSDKClient creates a new go-anxsdk client, reading the API token from the ANEXIA_TOKEN
+// getSDKClient creates a new go-anxsdk client. It is a variable so tests can
+// point the provider at an httptest server; production code never reassigns it.
+var getSDKClient = newSDKClient
+
+// newSDKClient creates a new go-anxsdk client, reading the API token from the ANEXIA_TOKEN
 // env var and reusing the same timeout/log-prefix behavior as the legacy client construction.
-func getSDKClient(machineName *string) *anxsdk.Client {
+func newSDKClient(machineName *string) *anxsdk.Client {
 	logPrefix := "[Anexia API]"
 	if machineName != nil {
 		logPrefix = fmt.Sprintf("[Anexia API for Machine %q]", *machineName)

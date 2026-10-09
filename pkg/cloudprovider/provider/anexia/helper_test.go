@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/anexia/go-anxsdk/v1/vsphere"
 	"github.com/gophercloud/gophercloud/testhelper"
 
 	cloudprovidertypes "k8c.io/machine-controller/pkg/cloudprovider/types"
@@ -31,7 +32,22 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-type jsonObject = map[string]interface{}
+// Fixture values shared across the test files in this package.
+const (
+	testMachineName    = "TestMachine"
+	testTaskID         = "TASK-ID"
+	testInstanceID     = "INSTANCE-ID"
+	testProvisioningID = "PROVISIONING-ID"
+	testIPIdentifier   = "IP-ID"
+	testPrefixID       = "0987654"
+
+	testPublicIPv4  = "8.8.8.8"
+	testPublicIPv6  = "2001:db8::2"
+	testPrivateIPv4 = "10.0.0.2"
+	testPrivateIPv6 = "fda0:23::2"
+)
+
+type jsonObject = map[string]any
 
 type ProvisionVMTestCase struct {
 	ReconcileContext reconcileContext
@@ -120,9 +136,10 @@ func hookableReconcileContext(locationID string, templateID string, hook func(*r
 		Status:   &anxtypes.ProviderStatus{},
 		UserData: "",
 		Config: resolvedConfig{
-			LocationID: locationID,
-			TemplateID: templateID,
-			DiskSize:   5,
+			LocationID:          locationID,
+			TemplateID:          templateID,
+			DiskSize:            5,
+			DiskPerformanceType: string(vsphere.DiskTypeENT4),
 			Networks: []resolvedNetwork{
 				{
 					VlanID: "VLAN-ID",
@@ -131,8 +148,13 @@ func hookableReconcileContext(locationID string, templateID string, hook func(*r
 					},
 				},
 			},
-			CPUs:   5,
-			Memory: 5,
+			CPUs:               5,
+			CPUPerformanceType: string(vsphere.CPUPerformanceTypeEnterprise),
+			Memory:             5,
+			SSHPublicKeys: []string{
+				"ssh-ed25519 AAAAC3Nza test1",
+				"ssh-rsa AAAAB3NzaC1yc test2",
+			},
 		},
 		ProviderData: &cloudprovidertypes.ProviderData{
 			Update: func(*clusterv1alpha1.Machine, ...cloudprovidertypes.MachineModifier) error {
@@ -144,7 +166,6 @@ func hookableReconcileContext(locationID string, templateID string, hook func(*r
 				DNS: providerconfigtypes.DNSConfig{
 					Servers: []string{
 						"1.1.1.1",
-						"",
 						"192.168.0.1",
 						"192.168.0.2",
 						"192.168.0.3",
